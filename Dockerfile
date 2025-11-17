@@ -1,7 +1,11 @@
-FROM node:20-slim
+# Dockerfile for Cloud Run
+FROM node:18-slim
+
 WORKDIR /app
-COPY package*.json ./
-RUN npm install
+COPY package.json package-lock.json* ./
+RUN npm ci --only=production
 COPY . .
-CMD ["node", "index.js"]
+
+ENV NODE_ENV=production
 EXPOSE 8080
+CMD ["node", "index.js"]
