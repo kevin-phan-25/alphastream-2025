@@ -8,7 +8,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write   # needed if you ever switch to Workload Identity
 
     steps:
       - uses: actions/checkout@v4
@@ -30,12 +29,12 @@ jobs:
             --region=us-east1 \
             --project=alphastream-2025 \
             --allow-unauthenticated \
-            --quiet \                          # removes the Y/n prompt forever
+            --quiet \
             --timeout=60 \
             --memory=512Mi \
-            --set-env-vars=ALPACA_KEY=${{ secrets.ALPACA_KEY }},\
-ALPACA_SECRET=${{ secrets.ALPACA_SECRET }},\
-MASSIVE_KEY=${{ secrets.MASSIVE_KEY }},\
-LOG_SHEET_ID=${{ secrets.LOG_SHEET_ID }},\
-WEBHOOK_URL=${{ secrets.WEBHOOK_URL }},\
-WEBHOOK_SECRET=${{ secrets.WEBHOOK_SECRET }}
+            --set-env-vars=ALPACA_KEY=${{ secrets.ALPACA_KEY }} \
+            --set-env-vars=ALPACA_SECRET=${{ secrets.ALPACA_SECRET }} \
+            --set-env-vars=MASSIVE_KEY=${{ secrets.MASSIVE_KEY }} \
+            --set-env-vars=LOG_SHEET_ID=${{ secrets.LOG_SHEET_ID }} \
+            --set-env-vars=WEBHOOK_URL=${{ secrets.WEBHOOK_URL }} \
+            --set-env-vars=WEBHOOK_SECRET=${{ secrets.WEBHOOK_SECRET }}
