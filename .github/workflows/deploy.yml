@@ -6,18 +6,20 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: 'read'
+      id-token: 'write'
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@v2
+
+      - id: 'auth'
+        uses: 'google-github-actions/auth@v2'
         with:
-          project_id: alphastream-2025
-          workload_identity_provider: projects/alphastream-2025/locations/global/workloadIdentityPools/github/providers/github-provider
-          service_account: github-deployer@alphastream-2025.iam.gserviceaccount.com
-      
+          workload_identity_provider: 'projects/alphastream-2025/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
+          service_account: 'github-deployer@alphastream-2025.iam.gserviceaccount.com'
+
       - name: Deploy to Cloud Run
-        uses: google-github-actions/deploy-cloudrun@v2
+        uses: 'google-github-actions/deploy-cloudrun@v2'
         with:
           service: alphastream-autopilot
           region: us-east1
