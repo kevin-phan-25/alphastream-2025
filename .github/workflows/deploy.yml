@@ -28,6 +28,4 @@ jobs:
             LOG_SHEET_ID=${{ secrets.LOG_SHEET_ID }}
             WEBHOOK_URL=${{ secrets.WEBHOOK_URL }}
             WEBHOOK_SECRET=${{ secrets.WEBHOOK_SECRET }}
-          allow_unauthenticated: true
-          timeout: 60s
-          memory: 512Mi
+          flags: '--allow-unauthenticated --timeout=60 --memory=512Mi'
