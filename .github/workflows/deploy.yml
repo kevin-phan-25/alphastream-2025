@@ -6,6 +6,10 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # needed if you ever switch to Workload Identity
+
     steps:
       - uses: actions/checkout@v4
 
@@ -14,7 +18,7 @@ jobs:
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-      - name: Setup gcloud
+      - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
         with:
           project_id: alphastream-2025
@@ -23,9 +27,15 @@ jobs:
         run: |
           gcloud run deploy alphastream-autopilot \
             --source . \
-            --region us-east1 \
-            --project alphastream-2025 \
+            --region=us-east1 \
+            --project=alphastream-2025 \
             --allow-unauthenticated \
-            --timeout 60 \
-            --memory 512Mi \
-            --set-env-vars ALPACA_KEY='${{ secrets.ALPACA_KEY }}',ALPACA_SECRET='${{ secrets.ALPACA_SECRET }}',MASSIVE_KEY='${{ secrets.MASSIVE_KEY }}',LOG_SHEET_ID='${{ secrets.LOG_SHEET_ID }}',WEBHOOK_URL='${{ secrets.WEBHOOK_URL }}',WEBHOOK_SECRET='${{ secrets.WEBHOOK_SECRET }}'
+            --quiet \                          # removes the Y/n prompt forever
+            --timeout=60 \
+            --memory=512Mi \
+            --set-env-vars=ALPACA_KEY=${{ secrets.ALPACA_KEY }},\
+ALPACA_SECRET=${{ secrets.ALPACA_SECRET }},\
+MASSIVE_KEY=${{ secrets.MASSIVE_KEY }},\
+LOG_SHEET_ID=${{ secrets.LOG_SHEET_ID }},\
+WEBHOOK_URL=${{ secrets.WEBHOOK_URL }},\
+WEBHOOK_SECRET=${{ secrets.WEBHOOK_SECRET }}
