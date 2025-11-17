@@ -17,6 +17,8 @@ jobs:
         with:
           workload_identity_provider: 'projects/alphastream-2025/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
           service_account: 'github-deployer@alphastream-2025.iam.gserviceaccount.com'
+          token_format: 'access_token'
+          audience: 'https://token.actions.githubusercontent.com'
 
       - name: Deploy to Cloud Run
         uses: 'google-github-actions/deploy-cloudrun@v2'
