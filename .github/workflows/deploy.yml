@@ -6,26 +6,58 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    steps:name: Deploy AlphaStream Autopilot
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Google Auth
-        uses: google-github-actions/auth@v2
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
         with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          project_id: alphastream-2025
+
+      - name: Authenticate with Service Account
+        run: |
+          echo '${{ secrets.GCP_SA_KEY }}' > key.json
+          gcloud auth activate-service-account --key-file=key.json
+          gcloud config set project alphastream-2025
 
       - name: Deploy to Cloud Run
-        uses: google-github-actions/deploy-cloudrun@v2
+        run: |
+          gcloud run deploy alphastream-autopilot \
+            --source . \
+            --region us-east1 \
+            --project alphastream-2025 \
+            --allow-unauthenticated \
+            --timeout 60 \
+            --memory 512Mi \
+            --set-env-vars ALPACA_KEY='${{ secrets.ALPACA_KEY }}',ALPACA_SECRET='${{ secrets.ALPACA_SECRET }}',MASSIVE_KEY='${{ secrets.MASSIVE_KEY }}',LOG_SHEET_ID='${{ secrets.LOG_SHEET_ID }}',WEBHOOK_URL='${{ secrets.WEBHOOK_URL }}',WEBHOOK_SECRET='${{ secrets.WEBHOOK_SECRET }}'
+      - uses: actions/checkout@v4
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
         with:
-          service: alphastream-autopilot
-          region: us-east1
-          source: .
           project_id: alphastream-2025
-          env_vars: |
-            ALPACA_KEY=${{ secrets.ALPACA_KEY }}
-            ALPACA_SECRET=${{ secrets.ALPACA_SECRET }}
-            MASSIVE_KEY=${{ secrets.MASSIVE_KEY }}
-            LOG_SHEET_ID=${{ secrets.LOG_SHEET_ID }}
-            WEBHOOK_URL=${{ secrets.WEBHOOK_URL }}
-            WEBHOOK_SECRET=${{ secrets.WEBHOOK_SECRET }}
-          flags: '--allow-unauthenticated --timeout=60 --memory=512Mi'
+
+      - name: Authenticate with Service Account
+        run: |
+          echo '${{ secrets.GCP_SA_KEY }}' > key.json
+          gcloud auth activate-service-account --key-file=key.json
+          gcloud config set project alphastream-2025
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy alphastream-autopilot \
+            --source . \
+            --region us-east1 \
+            --project alphastream-2025 \
+            --allow-unauthenticated \
+            --timeout 60 \
+            --memory 512Mi \
+            --set-env-vars ALPACA_KEY='${{ secrets.ALPACA_KEY }}',ALPACA_SECRET='${{ secrets.ALPACA_SECRET }}',MASSIVE_KEY='${{ secrets.MASSIVE_KEY }}',LOG_SHEET_ID='${{ secrets.LOG_SHEET_ID }}',WEBHOOK_URL='${{ secrets.WEBHOOK_URL }}',WEBHOOK_SECRET='${{ secrets.WEBHOOK_SECRET }}'
