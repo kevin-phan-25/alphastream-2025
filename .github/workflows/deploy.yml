@@ -1,0 +1,21 @@
+name: Deploy AlphaStream 2025
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: alphastream-2025
+          region: us-east1
+          source: .
+          credentials: ${{ secrets.GCP_SA_KEY }}
+          env_vars: |
+            ALPACA_KEY=${{ secrets.ALPACA_KEY }}
+            ALPACA_SECRET=${{ secrets.ALPACA_SECRET }}
+            MASSIVE_KEY=${{ secrets.MASSIVE_KEY }}
+            LOG_SHEET_ID=${{ secrets.LOG_SHEET_ID }}
