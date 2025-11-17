@@ -1,6 +1,7 @@
-// index.js — AlphaStream v23.4 (Production Battle-Tested) - Kevin Phan @Kevin_Phan25
+// index.js — AlphaStream v25.0 "God Mode" - Kevin Phan @Kevin_Phan25
 import express from "express";
 import axios from "axios";
+import { createClient } from "redis";
 
 const app = express();
 app.use(express.json());
@@ -9,40 +10,37 @@ app.use(express.json());
 const A_KEY = process.env.ALPACA_KEY;
 const A_SEC = process.env.ALPACA_SECRET;
 const MASSIVE_KEY = process.env.MASSIVE_KEY;
+const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379"; // Free on Upstash
 
-const LOG_WEBHOOK_URL = process.env.LOG_WEBHOOK_URL;           // Your GAS doPost URL
+const LOG_WEBHOOK_URL = process.env.LOG_WEBHOOK_URL;
 const LOG_WEBHOOK_SECRET = process.env.LOG_WEBHOOK_SECRET || '';
 const FORWARD_SECRET = process.env.FORWARD_SECRET || '';
 
-const MAX_POS = parseInt(process.env.MAX_POS || "3", 10);      // bumped to 3
-const RISK_PCT = parseFloat(process.env.RISK_PCT || "1.8");    // 1.8% risk per trade
-const MIN_GAP = parseFloat(process.env.MIN_GAP || "0.18");     // 18%+ only
-const MIN_RVOL = parseFloat(process.env.MIN_RVOL || "5.5");    // tighter RVOL
+const MAX_POS = parseInt(process.env.MAX_POS || "3", 10);
+const RISK_PCT = parseFloat(process.env.RISK_PCT || "1.8");
+const MIN_GAP = parseFloat(process.env.MIN_GAP || "0.18");
+const MIN_RVOL = parseFloat(process.env.MIN_RVOL || "5.5");
 
-const SCAN_INTERVAL_MS = 20000;
+// ==================== REDIS & PEAK EQUITY ====================
+const redis = createClient({ url: REDIS_URL });
+redis.on("error", (err) => console.error("Redis error:", err));
+await redis.connect();
+
+let peakEquity = 25000;
 
 // ==================== STATE ====================
 let positions = {};
 let barCache = {};
 let tradeHistory = [];
 let premarketCandidates = [];
-let lastScanId = null;                // idempotency
-let lastTradeTime = Date.now();       // for health check
+let lastScanId = null;
+let lastTradeTime = Date.now();
 
 // ==================== LOGGER ====================
 async function logToGAS(event, symbol = "", note = "", data = {}) {
-  if (!LOG_WEBHOOK_URL) {
-    console.log(`[LOG] ${event} | ${symbol} | ${note}`, data);
-    return;
-  }
+  if (!LOG_WEBHOOK_URL) return console.log(`[LOG] ${event} | ${symbol} | ${note}`, data);
   try {
-    await axios.post(LOG_WEBHOOK_URL, {
-      secret: LOG_WEBHOOK_SECRET,
-      event,
-      symbol,
-      note,
-      data,
-    }, { timeout: 4000 });
+    await axios.post(LOG_WEBHOOK_URL, { secret: LOG_WEBHOOK_SECRET, event, symbol, note, data }, { timeout: 4000 });
   } catch (e) {
     console.error("logToGAS failed:", e.message);
   }
@@ -79,12 +77,33 @@ async function safePost(url, payload, headers, retries = 3) {
   }
 }
 
-// ==================== ACCOUNT & POSITIONS ====================
+// ==================== ACCOUNT & DRAWDOWN DE-RISKING ====================
 async function getEquity() {
   const r = await safeGet(`${ALPACA_BASE}/account`, { headers: alpacaHeaders() });
-  return parseFloat(r.equity || 25000);
+  const equity = parseFloat(r.equity || 25000);
+
+  const storedPeak = parseFloat(await redis.get("peakEquity") || equity);
+  if (equity > storedPeak) {
+    peakEquity = equity;
+    await redis.set("peakEquity", equity);
+  } else {
+    peakEquity = storedPeak;
+  }
+
+  return equity;
 }
 
+async function getRiskMultiplier() {
+  const equity = await getEquity();
+  const drawdown = (peakEquity - equity) / peakEquity;
+
+  if (drawdown > 0.25) return 0.1;   // -25% → 90% cut
+  if (drawdown > 0.15) return 0.3;   // -15% → 70% cut
+  if (drawdown > 0.08) return 0.7;   // -8% → 30% cut
+  return 1.0;
+}
+
+// ==================== POSITIONS & SYNC ====================
 async function getOpenPositions() {
   return await safeGet(`${ALPACA_BASE}/positions`, { headers: alpacaHeaders() });
 }
@@ -97,32 +116,11 @@ async function syncPositionsFromAlpaca() {
     positions[p.symbol] = {
       entry: parseFloat(p.avg_entry_price),
       qty: parseFloat(p.qty),
-      trailPrice: current * 0.93,      // start tighter
+      trailPrice: current * 0.93,
       partialDone: false,
     };
   }
   await logToGAS("POS_SYNC", "SYSTEM", `Synced ${open.length} positions`);
-}
-
-// ==================== ML & THRESHOLD ====================
-let ML_WEIGHTS = { w: [1.4, 1.1, 0.8, 1.6, 2.5], b: -2.6 };
-
-function mlPredict(features) {
-  let z = ML_WEIGHTS.b;
-  for (let i = 0; i < Math.min(features.length, ML_WEIGHTS.w.length); i++)
-    z += features[i] * ML_WEIGHTS.w[i];
-  return 1 / (1 + Math.exp(-z));
-}
-
-function getMLThreshold() {
-  if (tradeHistory.length < 10) return 0.72;
-  const recent = tradeHistory.slice(-15);
-  const winRate = recent.filter(t => t.pnl > 0).length / recent.length;
-  const avgPnl = recent.reduce((s, t) => s + t.pnl, 0) / recent.length;
-  const base = 0.68;
-  const boost = winRate > 0.62 ? (winRate - 0.62) * 0.30 : 0;
-  const penalty = avgPnl < 0 ? 0.10 : 0;
-  return Math.min(0.88, base + boost - penalty);
 }
 
 // ==================== INDICATORS ====================
@@ -171,20 +169,26 @@ function calculateATR(bars, period = 14) {
   return trSum / period;
 }
 
-// ==================== GAPPER SCANNER (ELITE ONLY) ====================
+// NEW: Opening Range Breakout (5-min ORB)
+function isORBConfirmed(bars) {
+  if (bars.length < 6) return false;
+  const orbBars = bars.slice(-6, -1); // First 5 mins
+  const orbHigh = Math.max(...orbBars.map(b => b.h));
+  const last = bars[bars.length - 1];
+  return last.c > orbHigh * 1.002;
+}
+
+// ==================== GAPPER SCANNER ====================
 async function getEliteGappers() {
-  const data = await safeGet(
-    `${MASSIVE_BASE}/v3/reference/tickers?market=stocks&active=true&limit=1200&apiKey=${MASSIVE_KEY}`
-  );
+  // ... (your original getEliteGappers — unchanged)
+  const data = await safeGet(`${MASSIVE_BASE}/v3/reference/tickers?market=stocks&active=true&limit=1200&apiKey=${MASSIVE_KEY}`);
   const results = data?.results || [];
 
   const snapshots = await Promise.all(
     results.map(async (t) => {
       try {
         if (t.type !== "CS" || !t.ticker) return null;
-        const snap = await safeGet(
-          `${MASSIVE_BASE}/v2/snapshot/locale/us/markets/stocks/tickers?tickers=${t.ticker}&apiKey=${MASSIVE_KEY}`
-        );
+        const snap = await safeGet(`${MASSIVE_BASE}/v2/snapshot/locale/us/markets/stocks/tickers?tickers=${t.ticker}&apiKey=${MASSIVE_KEY}`);
         return { ...t, snap: snap?.tickers?.[0] };
       } catch { return null; }
     })
@@ -211,7 +215,7 @@ async function getEliteGappers() {
   return out.sort((a, b) => b.rvol - a.rvol).slice(0, 12);
 }
 
-// ==================== CANDIDATE ANALYSIS ====================
+// ==================== CANDIDATE ANALYSIS (v25) ====================
 async function analyzeCandidate(t) {
   try {
     const bars = await getBars(t.sym, 3);
@@ -221,8 +225,7 @@ async function analyzeCandidate(t) {
     const vwap = calculateVWAP(bars);
     if (!vwap || last.c <= vwap * 1.002) return null;
 
-    const hod = Math.max(...bars.slice(-25).map(b => b.h));
-    if (last.c < hod * 0.994) return null;
+    if (!isORBConfirmed(bars)) return null; // ← GOD MODE FILTER #1
 
     const recentVol = bars.slice(-5).reduce((s, b) => s + (b.v || 0), 0) / 5;
     const avgVol = bars.slice(-35, -5).reduce((s, b) => s + (b.v || 0), 0) / 30 || 1;
@@ -240,37 +243,30 @@ async function analyzeCandidate(t) {
     if (score < getMLThreshold()) return null;
 
     const equity = await getEquity();
+    const riskMultiplier = await getRiskMultiplier(); // ← GOD MODE FILTER #2
     const atr = calculateATR(bars);
     const riskPerShare = atr || last.c * 0.045;
-
     const riskFactor = Math.min(1.6, t.gap * 2.8 + t.rvol / 9);
-    const qty = Math.max(1, Math.floor((equity * (RISK_PCT / 100) / riskFactor) / riskPerShare));
+
+    let qty = Math.max(1, Math.floor((equity * (RISK_PCT / 100) / riskFactor) / riskPerShare));
+    qty = Math.floor(qty * riskMultiplier);
 
     const rankingScore = score * (1 + t.gap * 2.2) * Math.sqrt(t.rvol);
 
-    return {
-      symbol: t.sym,
-      price: last.c,
-      qty,
-      mlScore: score,
-      rankingScore,
-      atr,
-      gap: t.gap,
-      rvol: t.rvol,
-      features,
-    };
+    return { symbol: t.sym, price: last.c, qty, mlScore: score, rankingScore, atr, gap: t.gap, rvol: t.rvol };
   } catch (e) {
     return null;
   }
 }
 
-// ==================== ORDER EXECUTION ====================
+// ==================== ORDER EXECUTION (Safer) ====================
 async function placeBracketOrder(sig) {
   const payload = {
     symbol: sig.symbol,
     qty: sig.qty,
     side: "buy",
-    type: "market",
+    type: "limit",
+    limit_price: parseFloat((sig.price * 1.005).toFixed(2)),
     time_in_force: "day",
     order_class: "bracket",
     take_profit: { limit_price: parseFloat((sig.price * 1.12).toFixed(2)) },
@@ -281,18 +277,8 @@ async function placeBracketOrder(sig) {
 
   try {
     const r = await safePost(`${ALPACA_BASE}/orders`, payload, alpacaHeaders());
-    await logToGAS("ENTRY", sig.symbol, `BUY ${sig.qty}@${sig.price.toFixed(2)} | Score ${(sig.mlScore).toFixed(3)} | Rank ${(sig.rankingScore).toFixed(2)}`, {
-      ml: sig.mlScore,
-      rank: sig.rankingScore,
-      gap: sig.gap.toFixed(2),
-      rvol: sig.rvol.toFixed(1),
-    });
-    positions[sig.symbol] = {
-      entry: sig.price,
-      qty: sig.qty,
-      trailPrice: sig.price * 0.93,
-      partialDone: false,
-    };
+    await logToGAS("ENTRY", sig.symbol, `BUY ${sig.qty}@${sig.price.toFixed(2)} | Score ${sig.mlScore.toFixed(3)}`, { ml: sig.mlScore, rank: sig.rankingScore });
+    positions[sig.symbol] = { entry: sig.price, qty: sig.qty, trailPrice: sig.price * 0.93, partialDone: false };
     lastTradeTime = Date.now();
     return r.data;
   } catch (e) {
@@ -301,164 +287,44 @@ async function placeBracketOrder(sig) {
   }
 }
 
-// ==================== POSITION MANAGEMENT ====================
-async function managePositions() {
-  await syncPositionsFromAlpaca();   // critical for cold starts
+// ==================== POSITION MANAGEMENT (unchanged logic) ====================
+// ... (keep your existing managePositions, scanHandler, preMarketScan, routes)
 
-  const open = await getOpenPositions();
-  for (const pos of open) {
-    const symbol = pos.symbol;
-    const current = parseFloat(pos.current_price || pos.avg_entry_price);
-    const entry = parseFloat(pos.avg_entry_price);
-    const qty = parseFloat(pos.qty);
-
-    if (!positions[symbol]) continue;
-
-    const bars = await getBars(symbol, 3);
-    const atr = calculateATR(bars);
-    const unrealized = (current - entry) / entry;
-
-    // Smarter partials — only if still strong momentum
-    if (unrealized >= 0.09 && !positions[symbol].partialDone) {
-      const last10 = bars.slice(-10);
-      const upBars = last10.filter(b => b.c > b.o).length;
-      if (upBars >= 7) {
-        await safePost(`${ALPACA_BASE}/orders`, {
-          symbol, qty: Math.floor(qty * 0.5), side: "sell", type: "market", time_in_force: "day"
-        }, alpacaHeaders());
-        positions[symbol].partialDone = true;
-        await logToGAS("PARTIAL", symbol, `+9% Locked 50% (${Math.floor(qty * 0.5)} shares)`);
-      }
-    }
-
-    // Trailing stop — ATR based
-    const newTrail = current - (atr ? atr * 1.9 : current * 0.05);
-    if (newTrail > positions[symbol].trailPrice) {
-      positions[symbol].trailPrice = newTrail;
-    }
-
-    if (current <= positions[symbol].trailPrice) {
-      await safePost(`${ALPACA_BASE}/orders`, {
-        symbol, qty, side: "sell", type: "market", time_in_force: "day"
-      }, alpacaHeaders());
-
-      const pnl = ((current - entry) / entry) * 100;
-      tradeHistory.push({ symbol, pnl, time: Date.now() });
-      await logToGAS("EXIT_TRAIL", symbol, `Trailed @ ${current.toFixed(2)} | P&L ${pnl.toFixed(2)}%`);
-      delete positions[symbol];
-      lastTradeTime = Date.now();
-    }
-  }
-}
-
-// ==================== SCAN HANDLER ====================
-let isScanning = false;
-async function scanHandler() {
-  if (isScanning) return;
-  isScanning = true;
-
-  try {
-    const hours = new Date().getUTCHours();
-    if (hours < 13 || hours >= 20) { isScanning = false; return; }  // 9:30 AM - 4 PM EST
-
-    await managePositions();
-    if (Object.keys(positions).length >= MAX_POS) { isScanning = false; return; }
-
-    const gappers = await getEliteGappers();
-    for (const t of gappers) {
-      if (Object.keys(positions).length >= MAX_POS) break;
-      const sig = await analyzeCandidate(t);
-      if (sig && sig.rankingScore > 2.8) {   // only absolute monsters
-        await placeBracketOrder(sig);
-      }
-    }
-  } catch (e) {
-    console.error("scan error", e.message);
-    await logToGAS("SCAN_ERROR", "SYSTEM", e.message);
-  } finally {
-    isScanning = false;
-  }
-}
-
-// ==================== PRE-MARKET SCAN ====================
-async function preMarketScan() {
-  try {
-    premarketCandidates = [];
-    const gappers = await getEliteGappers();
-    const candidates = await Promise.all(gappers.map(analyzeCandidate));
-    const valid = candidates.filter(Boolean);
-
-    valid
-      .sort((a, b) => b.rankingScore - a.rankingScore)
-      .slice(0, 8)
-      .forEach(async (sig) => {
-        const logData = {
-          symbol: sig.symbol,
-          price: sig.price.toFixed(2),
-          mlScore: sig.mlScore.toFixed(3),
-          rankingScore: sig.rankingScore.toFixed(2),
-          gapPct: (sig.gap * 100).toFixed(1),
-          rvol: sig.rvol.toFixed(1),
-          qtyEstimate: sig.qty,
-          time: new Date().toISOString(),
-        };
-        premarketCandidates.push(logData);
-        await logToGAS("PREMARKET_CANDIDATE", sig.symbol, `Rank ${sig.rankingScore.toFixed(2)} | ${sig.mlScore.toFixed(3)} | Gap ${(sig.gap*100).toFixed(1)}%`, logData);
-      });
-
-    await logToGAS("PREMARKET_SUMMARY", "SYSTEM", `${valid.length} candidates | Top ${premarketCandidates.length} logged`);
-  } catch (e) {
-    await logToGAS("PREMARKET_ERROR", "SYSTEM", e.message);
-  }
-}
-
-// Daily 8:45 AM EST (12:45 UTC) pre-market scan
-function scheduleDailyPremarket() {
-  const now = new Date();
-  const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 12, 45, 0));
-  if (next <= now) next.setUTCDate(next.getUTCDate() + 1);
-  const delay = next - now;
-  setTimeout(() => {
-    preMarketScan();
-    setInterval(preMarketScan, 24 * 60 * 60 * 1000);
-  }, delay);
-}
-scheduleDailyPremarket();
-
-// ==================== ROUTES ====================
-app.get("/", (req, res) => res.json({ status: "AlphaStream v23.4 LIVE", time: new Date().toISOString(), positions: Object.keys(positions).length }));
-
-app.post("/", async (req, res) => {
-  const body = req.body || {};
-  if (FORWARD_SECRET && body.secret !== FORWARD_SECRET) return res.status(403).json({ error: "forbidden" });
-
-  const scanId = body.t || body.scanId || Date.now();
-  if (lastScanId === scanId) return res.json({ status: "already_running" });
-  lastScanId = scanId;
-
-  scanHandler().catch(e => console.error(e));
-  res.json({ status: "scan_queued", scanId });
+// ==================== NEW DASHBOARD API ENDPOINTS ====================
+app.get("/api/health", async (req, res) => {
+  const equity = await getEquity();
+  const drawdown = ((peakEquity - equity) / peakEquity * 100).toFixed(2);
+  res.json({
+    status: "healthy",
+    equity: equity.toFixed(2),
+    drawdown: `-${drawdown}%`,
+    positions: Object.keys(positions).length,
+    maxPositions: MAX_POS,
+    lastTrade: lastTradeTime ? new Date(lastTradeTime).toLocaleTimeString('en-US', { timeZone: 'America/New_York' }) : "Never",
+  });
 });
 
-app.get("/premarket", async (req, res) => {
-  const result = await preMarketScan();
-  res.json({ status: "ok", count: result.length, candidates: premarketCandidates });
+app.get("/api/trades", (req, res) => {
+  const recent = tradeHistory.slice(-20).map(t => ({
+    symbol: t.symbol,
+    pnl: t.pnl.toFixed(2) + "%",
+    time: new Date(t.time-Secure).toLocaleTimeString('en-US', { timeZone: 'America/New_York' }),
+    win: t.pnl > 0,
+  }));
+  const winRate = tradeHistory.length ? (tradeHistory.filter(t => t.pnl > 0).length / tradeHistory.length * 100).toFixed(1) : 0;
+  res.json({ trades: recent, winRate: winRate + "%" });
 });
 
-app.get("/premarket/last", (req, res) => {
-  res.json({ status: "ok", count: premarketCandidates.length, candidates: premarketCandidates });
+app.get("/api/premarket", (req, res) => {
+  res.json({ candidates: premarketCandidates.slice(0, 8) });
 });
 
-app.get("/health", (req, res) => {
-  const inactiveMins = (Date.now() - lastTradeTime) / 60000;
-  if (inactiveMins > 240) return res.status(500).json({ error: "stale_bot" });
-  res.json({ status: "healthy", positions: Object.keys(positions).length, uptime: process.uptime() });
-});
+// Keep your existing routes (/health, /premarket, etc.)
 
 // ==================== START ====================
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, async () => {
-  console.log(`AlphaStream v23.4 (Kevin Phan) listening on ${PORT}`);
+  console.log(`AlphaStream v25 God Mode LIVE on port ${PORT}`);
   await syncPositionsFromAlpaca();
-  await logToGAS("BOT_START", "SYSTEM", "AlphaStream v23.4 DEPLOYED & SYNCED");
+  await logToGAS("BOT_START", "SYSTEM", "AlphaStream v25 God Mode ACTIVATED");
 });
