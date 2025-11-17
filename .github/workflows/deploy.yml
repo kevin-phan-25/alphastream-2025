@@ -1,12 +1,5 @@
 name: Deploy AlphaStream Autopilot
-on:
-  push:
-    branches: [ main ]
 
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:name: Deploy AlphaStream Autopilot
 on:
   push:
     branches: [ main ]
@@ -22,10 +15,10 @@ jobs:
         with:
           project_id: alphastream-2025
 
-      - name: Authenticate with Service Account
+      - name: Authenticate with Service Account Key
         run: |
-          echo '${{ secrets.GCP_SA_KEY }}' > key.json
-          gcloud auth activate-service-account --key-file=key.json
+          echo '${{ secrets.GCP_SA_KEY }}' > /tmp/key.json
+          gcloud auth activate-service-account --key-file=/tmp/key.json
           gcloud config set project alphastream-2025
 
       - name: Deploy to Cloud Run
@@ -37,27 +30,10 @@ jobs:
             --allow-unauthenticated \
             --timeout 60 \
             --memory 512Mi \
-            --set-env-vars ALPACA_KEY='${{ secrets.ALPACA_KEY }}',ALPACA_SECRET='${{ secrets.ALPACA_SECRET }}',MASSIVE_KEY='${{ secrets.MASSIVE_KEY }}',LOG_SHEET_ID='${{ secrets.LOG_SHEET_ID }}',WEBHOOK_URL='${{ secrets.WEBHOOK_URL }}',WEBHOOK_SECRET='${{ secrets.WEBHOOK_SECRET }}'
-      - uses: actions/checkout@v4
-
-      - name: Setup gcloud
-        uses: google-github-actions/setup-gcloud@v2
-        with:
-          project_id: alphastream-2025
-
-      - name: Authenticate with Service Account
-        run: |
-          echo '${{ secrets.GCP_SA_KEY }}' > key.json
-          gcloud auth activate-service-account --key-file=key.json
-          gcloud config set project alphastream-2025
-
-      - name: Deploy to Cloud Run
-        run: |
-          gcloud run deploy alphastream-autopilot \
-            --source . \
-            --region us-east1 \
-            --project alphastream-2025 \
-            --allow-unauthenticated \
-            --timeout 60 \
-            --memory 512Mi \
-            --set-env-vars ALPACA_KEY='${{ secrets.ALPACA_KEY }}',ALPACA_SECRET='${{ secrets.ALPACA_SECRET }}',MASSIVE_KEY='${{ secrets.MASSIVE_KEY }}',LOG_SHEET_ID='${{ secrets.LOG_SHEET_ID }}',WEBHOOK_URL='${{ secrets.WEBHOOK_URL }}',WEBHOOK_SECRET='${{ secrets.WEBHOOK_SECRET }}'
+            --set-env-vars \
+              ALPACA_KEY='${{ secrets.ALPACA_KEY }}',\
+              ALPACA_SECRET='${{ secrets.ALPACA_SECRET }}',\
+              MASSIVE_KEY='${{ secrets.MASSIVE_KEY }}',\
+              LOG_SHEET_ID='${{ secrets.LOG_SHEET_ID }}',\
+              WEBHOOK_URL='${{ secrets.WEBHOOK_URL }}',\
+              WEBHOOK_SECRET='${{ secrets.WEBHOOK_SECRET }}'
