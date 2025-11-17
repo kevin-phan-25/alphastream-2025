@@ -1,20 +1,12 @@
 {
-  "name": "alphastream-autopilot-2025",
+  "name": "alphastream-2025",
   "version": "1.0.0",
-  "description": "AlphaStream 2025 Autopilot — 74.9% Win Rate",
   "main": "index.js",
-  "scripts": {
-    "start": "node index.js",
-    "deploy": "gcloud run deploy"
-  },
+  "scripts": { "start": "node index.js" },
   "dependencies": {
-    "express": "^4.18.2",
-    "axios": "^1.6.0",
-    "node-cron": "^3.0.3",
-    "googleapis": "^128.0.0",
-    "@google-cloud/secret-manager": "^5.0.0"
+    "express": "^4.19.2",
+    "axios": "^1.7.7",
+    "@google-cloud/firestore": "^7.9.0"
   },
-  "engines": {
-    "node": ">=18.0.0"
-  }
+  "engines": { "node": ">=20" }
 }
