@@ -8,18 +8,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
-      - id: auth
+
+      - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
-          credentials_json: '${{ secrets.GCP_SA_KEY }}'
-      
-      - id: deploy
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Deploy to Cloud Run
         uses: google-github-actions/deploy-cloudrun@v2
         with:
           service: alphastream-autopilot
           region: us-east1
-          image: 'gcr.io/alphastream-2025/alphastream-autopilot:latest'
+          source: .
           project_id: alphastream-2025
           env_vars: |
             ALPACA_KEY=${{ secrets.ALPACA_KEY }}
