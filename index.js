@@ -1,4 +1,4 @@
-// index.js — AlphaStream v24.4 — MASSIVE.COM STOCKS API INTEGRATION (Nov 2025)
+// index.js — AlphaStream v24.5 — PENNY STOCKS ONLY ($1–$20, No Blue Chips)
 import express from "express";
 import axios from "axios";
 
@@ -18,7 +18,7 @@ app.use((req, res, next) => {
 const {
   ALPACA_KEY = "",
   ALPACA_SECRET = "",
-  MASSIVE_KEY = "",
+  MASSIVE_KEY = "uJq_QdVgvrlry9ZpvkIKcs6s2q2qGKtZ",  // Your key
   PREDICTOR_URL = "",
   LOG_WEBHOOK_URL = "",
   LOG_WEBHOOK_SECRET = "",
@@ -29,7 +29,6 @@ const {
 
 const DRY_MODE_BOOL = !["false", "0", "no", "off"].includes(String(DRY_MODE).toLowerCase());
 const A_BASE = "https://paper-api.alpaca.markets/v2";
-const M_BASE = "https://api.massive.com";
 const headers = { "APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET };
 
 let positions = {};
@@ -52,13 +51,12 @@ async function log(event, symbol = "", note = "", data = {}) {
 
 // Dashboard
 app.get("/", (req, res) => res.json({
-  bot: "AlphaStream v24.4",
+  bot: "AlphaStream v24.5 PENNY MONSTER",
   status: "LIVE",
   time: new Date().toISOString(),
   positions: Object.keys(positions).length,
   max_pos: MAX_POS,
-  dry_mode: DRY_MODE_BOOL,
-  mode: "MASSIVE STOCKS API — PRE-MARKET + MORNING"
+  dry_mode: DRY_MODE_BOOL
 }));
 
 app.get("/healthz", (_, res) => res.status(200).send("OK"));
@@ -66,9 +64,9 @@ app.get("/healthz", (_, res) => res.status(200).send("OK"));
 // Manual scan
 app.post("/", async (req, res) => {
   if (FORWARD_SECRET && req.body?.secret !== FORWARD_SECRET) return res.status(403).send("no");
-  res.json({ status: "SCAN TRIGGERED — MASSIVE STOCKS API" });
+  res.json({ status: "PENNY SCAN TRIGGERED — $1–$20 ONLY" });
   await log("MANUAL_SCAN", "DASHBOARD", "User triggered");
-  scanAndEnter();
+  scanPennyStocks();
 });
 
 // Exit all
@@ -96,19 +94,19 @@ async function placeOrder(sym, qty, side) {
       time_in_force: "day",
       extended_hours: true
     }, { headers });
-    await log("LIVE_ORDER", sym, `${side.toUpperCase()} ${qty} (extended hours)`);
+    await log("LIVE_ORDER", sym, `${side.toUpperCase()} ${qty} (penny stock)`);
   } catch (e) {
     await log("ORDER_FAIL", sym, e.response?.data?.message || e.message);
   }
 }
 
-// 3:45 PM ET EXIT
+// 3:45 PM ET AUTO EXIT
 async function exitAt345() {
   const now = new Date();
   const utcHour = now.getUTCHours();
   const utcMin = now.getUTCMinutes();
   if (utcHour === 19 && utcMin >= 45 && utcMin < 50 && Object.keys(positions).length > 0) {
-    await log("AUTO_EXIT_ALL", "SYSTEM", "3:45 PM — closing all positions");
+    await log("AUTO_EXIT_ALL", "SYSTEM", "3:45 PM — closing all penny positions");
     for (const sym in positions) {
       await placeOrder(sym, positions[sym].qty, "sell");
       await log("AUTO_EXIT", sym, "Sold at 3:45 PM");
@@ -117,8 +115,8 @@ async function exitAt345() {
   }
 }
 
-// MAIN SCANNER — MASSIVE.COM TOP GAINERS & SNAPSHOTS
-async function scanAndEnter() {
+// PENNY STOCKS SCANNER — $1–$20 ONLY, NO BLUE CHIPS
+async function scanPennyStocks() {
   if (scanning) return;
   scanning = true;
 
@@ -142,55 +140,49 @@ async function scanAndEnter() {
     }
 
     const isPreMarket = utcTime < 1330;
-    await log(isPreMarket ? "PREMARKET_SCAN" : "MORNING_SCAN", "SYSTEM", 
-      isPreMarket ? "7:00–9:29 AM ET — hunting monsters" : "9:30–11:00 AM ET — hunting");
+    await log(isPreMarket ? "PREMARKET_PENNY" : "MORNING_PENNY", "SYSTEM", 
+      isPreMarket ? "7:00–9:29 AM ET — hunting penny monsters" : "9:30–11:00 AM ET — hunting pennies");
 
-    // TOP GAINERS — MASSIVE.COM (your key works here)
-    let gappers = [];
+    // FULL SNAPSHOT — FILTER TO PENNY STOCKS ($1–$20, high gap/volume)
+    let snapshot;
     try {
       const res = await axios.get(
-        `${M_BASE}/v2/snapshot/locale/us/markets/stocks/gainers?apiKey=${MASSIVE_KEY}`,
+        `${M_BASE}/v2/snapshot/locale/us/markets/stocks/tickers?apiKey=${MASSIVE_KEY}`,
         { timeout: 15000 }
       );
-      gappers = res.data.tickers || [];
-      await log("TOP_GAINERS", "SYSTEM", `${gappers.length} top movers loaded`, gappers.map(t => `${t.ticker} +${t.todaysChangePerc?.toFixed(1)}%`));
+      snapshot = res.data;
     } catch (e) {
-      await log("GAINERS_ERROR", "SYSTEM", "Top gainers failed", { error: e.message });
-      // Fallback: Full snapshot
-      try {
-        const res = await axios.get(
-          `${M_BASE}/v2/snapshot/locale/us/markets/stocks/tickers?apiKey=${MASSIVE_KEY}`,
-          { timeout: 15000 }
-        );
-        const tickers = Object.values(res.data.tickers || {});
-        gappers = tickers
-          .filter(t => t.prevDay && t.lastTrade && t.lastTrade.p > 1 && t.lastTrade.v >= 500000)
-          .map(t => {
-            const gap = (t.lastTrade.p / t.prevDay.c - 1) * 100;
-            return { ticker: t.ticker, ...t, gap };
-          })
-          .filter(t => t.gap >= 15)
-          .sort((a, b) => b.gap - a.gap)
-          .slice(0, 20);
-        await log("SNAPSHOT_FALLBACK", "SYSTEM", `${gappers.length} gappers from full snapshot`);
-      } catch (fallbackE) {
-        await log("SNAPSHOT_FAIL", "SYSTEM", "Both endpoints failed", { error: fallbackE.message });
-        scanning = false;
-        return;
-      }
+      await log("SNAPSHOT_ERROR", "SYSTEM", "Snapshot failed", { error: e.message });
+      scanning = false;
+      return;
     }
 
-    for (const t of gappers) {
+    const tickers = Object.values(snapshot.tickers || {});
+    const pennyGappers = tickers
+      .filter(t => t.prevDay && t.lastTrade && t.lastTrade.p >= 1 && t.lastTrade.p <= 20) // $1–$20
+      .filter(t => t.lastTrade.v >= 500000) // 500K+ volume
+      .map(t => {
+        const gap = (t.lastTrade.p / t.prevDay.c - 1) * 100;
+        return { ...t, gap };
+      })
+      .filter(t => t.gap >= 15) // 15%+ gap
+      .sort((a, b) => b.gap - a.gap)
+      .slice(0, 20); // top 20 penny monsters
+
+    await log("PENNY_MONSTERS", "SYSTEM", `${pennyGappers.length} penny rockets $1–$20`, 
+      pennyGappers.map(t => `${t.ticker} +${t.gap.toFixed(1)}% | $${t.lastTrade.p.toFixed(2)}`));
+
+    for (const t of pennyGappers) {
       if (Object.keys(positions).length >= parseInt(MAX_POS)) break;
       if (positions[t.ticker]) continue;
 
-      const gap = t.gap || t.todaysChangePerc || 0;
-      await log("CANDIDATE", t.ticker, `+${gap.toFixed(1)}% | $${t.lastTrade?.p.toFixed(2)}`);
+      const gap = t.gap;
+      await log("PENNY_CANDIDATE", t.ticker, `+${gap.toFixed(1)}% | $${t.lastTrade.p.toFixed(2)} | Vol ${(t.lastTrade.v/1000).toFixed(0)}K`);
 
-      // Get 1-min bars from Massive (works with your key)
+      // Get 1-min bars
       let bars = [];
       try {
-        const from = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10); // 3 days ago
+        const from = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10); // 3 days
         const to = new Date().toISOString().slice(0, 10);
         const res = await axios.get(
           `${M_BASE}/v2/aggs/ticker/${t.ticker}/range/1/minute/${from}/${to}?adjusted=true&limit=200&apiKey=${MASSIVE_KEY}`
@@ -246,7 +238,7 @@ async function scanAndEnter() {
           const qty = Math.max(1, Math.floor(25000 * 0.012 / (cur.atr * 1.5)));
           await placeOrder(t.ticker, qty, "buy");
           positions[t.ticker] = { entry: cur.price, qty, gap };
-          await log("ENTRY", t.ticker, `${isPreMarket ? "PRE-MARKET" : "REGULAR"} +${gap.toFixed(1)}% | ML ${(prob*100).toFixed(1)}%`, { qty });
+          await log("PENNY_ENTRY", t.ticker, `+${gap.toFixed(1)}% | ML ${(prob*100).toFixed(1)}%`, { qty });
         }
       }
     }
@@ -261,9 +253,9 @@ async function scanAndEnter() {
 // START
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, "0.0.0.0", async () => {
-  console.log(`ALPHASTREAM v26.0 LIVE on port ${PORT}`);
-  await log("BOT_START", "SYSTEM", "Massive.com Top Gainers + Pre-Market Entries", { dry_mode: DRY_MODE_BOOL });
-  scanAndEnter();
-  setInterval(scanAndEnter, 75000);  // every 75 sec
-  setInterval(exitAt345, 60000);     // check every min
+  console.log(`ALPHASTREAM v24.5 PENNY MONSTER LIVE on port ${PORT}`);
+  await log("BOT_START", "SYSTEM", "$1–$20 penny stocks only", { dry_mode: DRY_MODE_BOOL });
+  scanPennyStocks();
+  setInterval(scanPennyStocks, 90000); // every 90 sec
+  setInterval(exitAt345, 60000); // check every min
 });
