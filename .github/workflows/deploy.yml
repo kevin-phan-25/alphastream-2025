@@ -9,40 +9,38 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write  # REQUIRED for Workload Identity Federation (gcloud auth)
-      
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
 
+    steps:
+      - uses: actions/checkout@v4
+
+      # Authenticate to GCP
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
+      # Setup gcloud SDK
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
         with:
           project_id: alphastream-2025
 
+      # Deploy to Cloud Run
       - name: Deploy to Cloud Run
         run: |
           gcloud run deploy alphastream-autopilot \
             --source . \
             --region=us-east1 \
             --project=alphastream-2025 \
-            --platform=managed \
             --allow-unauthenticated \
             --quiet \
             --timeout=60 \
             --memory=512Mi \
-            --max-instances=3 \
-            --min-instances=0 \
-            --set-env-vars "ALPACA_KEY=${{ secrets.ALPACA_KEY }}" \
-            --set-env-vars "ALPACA_SECRET=${{ secrets.ALPACA_SECRET }}" \
-            --set-env-vars "MASSIVE_KEY=${{ secrets.MASSIVE_KEY }}" \
-            --set-env-vars "LOG_SHEET_ID=${{ secrets.LOG_SHEET_ID }}" \
-            --set-env-vars "WEBHOOK_URL=${{ secrets.WEBHOOK_URL }}" \
-            --set-env-vars "WEBHOOK_SECRET=${{ secrets.WEBHOOK_SECRET }}" \
-            --set-env-vars PREDICTOR_URL=${{ secrets.PREDICTOR_URL }}" \
-            -set-env-vars=DRY_MODE=false
+            --set-env-vars=ALPACA_KEY=${{ secrets.ALPACA_KEY }} \
+            --set-env-vars=ALPACA_SECRET=${{ secrets.ALPACA_SECRET }} \
+            --set-env-vars=MASSIVE_KEY=${{ secrets.MASSIVE_KEY }} \
+            --set-env-vars=LOG_SHEET_ID=${{ secrets.LOG_SHEET_ID }} \
+            --set-env-vars=WEBHOOK_URL=${{ secrets.WEBHOOK_URL }} \
+            --set-env-vars=WEBHOOK_SECRET=${{ secrets.WEBHOOK_SECRET }} \
+            --set-env-vars=PREDICTOR_URL=${{ secrets.PREDICTOR_URL }} \
+            --set-env-vars=DRY_MODE=false
