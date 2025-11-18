@@ -189,13 +189,14 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
 process.on("SIGTERM", () => server.close(() => process.exit(0)));
 process.on("SIGINT", () => server.close(() => process.exit(0)));
 
+// Silent manual exit endpoint
 app.post("/exit", async (req, res) => {
   if (req.body?.secret !== FORWARD_SECRET) return res.status(403).send("no");
   const sym = req.body.symbol;
   if (positions[sym]) {
     await placeOrder(sym, positions[sym].qty, "sell");
     delete positions[sym];
-    await log("MANUAL_EXIT", sym, "Dashboard exit");
+    await log("MANUAL_EXIT", sym, "Exited via dashboard");
   }
-  res.json({ status: "EXITED" });
+  res.json({ status: "exited" });
 });
