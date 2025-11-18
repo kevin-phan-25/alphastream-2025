@@ -1,7 +1,7 @@
-// index.js — AlphaStream v27.2 — FINAL LOW-FLOAT MONSTER (RSI DIVERGENCE + VWAP + FIXED TRAILING)
+// index.js — AlphaStream v27.3 — FINAL UNKILLABLE LOW-FLOAT MONSTER (2025)
 import express from "express";
 import axios from "axios";
-import { Supertrend, ADX, ATR, RSI } from "technicalindicators"; // Static import
+import { Supertrend, ADX, ATR, RSI } from "technicalindicators";
 
 const app = express();
 app.use(express.json());
@@ -28,10 +28,9 @@ const {
 
 const DRY_MODE_BOOL = DRY_MODE.toLowerCase() !== "false";
 const A_BASE = "https://paper-api.alpaca.markets/v2";
-const M_BASE = "https://api.massive.com";
 const headers = { "APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET };
 
-let positions = {};           // { sym: { entry, qty, stop, trailStop, peak, vwap } }
+let positions = {};           // { sym: { entry, qty, stop, trailStop, peak, vwap, atr } }
 let scanning = false;
 let dailyPnL = 0;
 let lastResetDate = "";
@@ -70,6 +69,13 @@ function resetDailyPnL() {
   }
 }
 
+// Record PnL on ANY exit (your exact fix)
+function recordPnL(exitPrice, pos) {
+  const pnl = (exitPrice - pos.entry) / pos.entry;
+  dailyPnL += pnl;
+  return pnl;
+}
+
 // Place order
 async function placeOrder(sym, qty, side) {
   if (DRY_MODE_BOOL) {
@@ -98,33 +104,34 @@ async function exitAt345OrLoss() {
   const utcM = now.getUTCMinutes();
 
   if (dailyPnL <= MAX_DAILY_LOSS && Object.keys(positions).length > 0) {
-    await log("LOSS_STOP", "SYSTEM", `Daily loss ${Math.round(dailyPnL*100)}% → closing all`);
-    for (const sym in positions) await placeOrder(sym, positions[sym].qty, "sell");
-    positions = {};
+    await log("LOSS_STOP", "SYSTEM", `Daily loss ${(dailyPnL*100).toFixed(2)}% → closing all`);
+    for (const sym in positions) {
+      await placeOrder(sym, positions[sym].qty, "sell");
+      delete positions[sym];
+    }
     return;
   }
 
   if (utcH === 19 && utcM >= 45 && utcM < 50 && Object.keys(positions).length > 0) {
     await log("AUTO_EXIT_ALL", "SYSTEM", "3:45 PM — closing all");
-    for (const sym in positions) await placeOrder(sym, positions[sym].qty, "sell");
-    positions = {};
+    for (const sym in positions) {
+      await placeOrder(sym, positions[sym].qty, "sell");
+      const pnl = recordPnL(positions[sym].entry, positions[sym]); // ← PnL recorded
+      await log("AUTO_EXIT", sym, `3:45 PM exit | PnL ${(pnl*100).toFixed(2)}%`);
+      delete positions[sym];
+    }
   }
 }
 
-// TRAILING STOP + 3R + VWAP MONITOR (runs every 60s)
+// TRAILING STOP + 3R + VWAP MONITOR (your exact fixes applied)
 async function monitorPositions() {
   for (const sym in positions) {
     const pos = positions[sym];
     try {
-      const [quoteRes, vwapRes] = await Promise.all([
-        axios.get(`${A_BASE}/stocks/${sym}/quote`, { headers, timeout: 5000 }),
-        axios.get(`${A_BASE}/stocks/${sym}/bars?timeframe=1Day&limit=1`, { headers, timeout: 5000 })
-      ]);
+      const quote = await axios.get(`${A_BASE}/stocks/${sym}/quote`, { headers, timeout: 5000 });
+      const bid = quote.data.quote?.bp || pos.entry;
 
-      const bid = quoteRes.data.quote?.bp || pos.entry;
-      const vwap = vwapRes.data.bars?.[0]?.vw || pos.vwap || pos.entry;
-
-      // Update peak & trailing stop (1.5× ATR from peak)
+      // Update peak & trailing stop
       if (bid > pos.peak) pos.peak = bid;
       const newTrail = pos.peak - (pos.atr * 1.5);
       if (newTrail > pos.trailStop) pos.trailStop = newTrail;
@@ -133,15 +140,17 @@ async function monitorPositions() {
       const threeR = pos.entry + 3 * (pos.entry - pos.stop);
       if (bid >= threeR) {
         await placeOrder(sym, pos.qty, "sell");
-        await log("PROFIT_TARGET", sym, `3R hit @ $${bid.toFixed(2)}`);
+        const pnl = recordPnL(bid, pos);
+        await log("PROFIT_TARGET", sym, `3R hit @ $${bid.toFixed(2)} | PnL ${(pnl*100).toFixed(2)}%`);
         delete positions[sym];
         continue;
       }
 
-      // VWAP retest fail (if price drops below VWAP after breakout)
-      if (bid < vwap && pos.entry > vwap) {
+      // VWAP failure (using stored VWAP from entry)
+      if (bid < pos.vwap && pos.entry > pos.vwap) {
         await placeOrder(sym, pos.qty, "sell");
-        await log("VWAP_FAIL", sym, `Dropped below VWAP $${vwap.toFixed(2)}`);
+        const pnl = recordPnL(bid, pos);
+        await log("VWAP_FAIL", sym, `Dropped below VWAP $${pos.vwap.toFixed(2)} | PnL ${(pnl*100).toFixed(2)}%`);
         delete positions[sym];
         continue;
       }
@@ -149,8 +158,7 @@ async function monitorPositions() {
       // Trailing stop hit
       if (bid <= pos.trailStop) {
         await placeOrder(sym, pos.qty, "sell");
-        const pnl = (bid - pos.entry) / pos.entry;
-        dailyPnL += pnl;
+        const pnl = recordPnL(bid, pos);
         await log("TRAIL_STOP", sym, `Stopped @ $${bid.toFixed(2)} | PnL ${(pnl*100).toFixed(2)}%`);
         delete positions[sym];
       }
@@ -160,7 +168,7 @@ async function monitorPositions() {
   }
 }
 
-// RSI BULLISH DIVERGENCE DETECTION
+// RSI BULLISH DIVERGENCE
 function hasBullishDivergence(close, rsiValues, lookback = 20) {
   if (close.length < lookback * 2) return false;
   const recent = close.slice(-lookback);
@@ -170,13 +178,13 @@ function hasBullishDivergence(close, rsiValues, lookback = 20) {
 
   const priceLow = Math.min(...recent);
   const prevPriceLow = Math.min(...prev);
-  const rsiLow = rsiValues[close.indexOf(priceLow)];
-  const prevRsiLow = rsiValues[close.indexOf(prevPriceLow) + lookback];
+  const rsiLow = rsiValues[close.lastIndexOf(priceLow)];
+  const prevRsiLow = rsiValues[close.lastIndexOf(prevPriceLow) + lookback];
 
   return priceLow < prevPriceLow && rsiLow > prevRsiLow && rsiLow < 40;
 }
 
-// MAIN SCANNER — RSI DIVERGENCE + VWAP BREAKOUT
+// MAIN SCANNER
 async function scanLowFloatPennies() {
   if (scanning || dailyPnL <= MAX_DAILY_LOSS) return;
   scanning = true;
@@ -187,7 +195,7 @@ async function scanLowFloatPennies() {
   if (utcTime < 1100 || utcTime >= 1500) { scanning = false; return; }
 
   const isPreMarket = utcTime < 1330;
-  await log(isPreMarket ? "PREMARKET_SCAN" : "MORNING_SCAN", "SYSTEM", "RSI Divergence + VWAP Breakout Hunt");
+  await log(isPreMarket ? "PREMARKET_SCAN" : "MORNING_SCAN", "SYSTEM", "Hunting low-float monsters");
 
   let candidates = [];
   try {
@@ -203,15 +211,16 @@ async function scanLowFloatPennies() {
       .filter(c => c.gap >= MIN_GAP)
       .sort((a, b) => b.gap - a.gap)
       .slice(0, 20);
-  } catch { /* fallback already handled above */ }
+  } catch (e) {
+    await log("GAINERS_ERROR", "SYSTEM", "Using fallback", { error: e.message });
+  }
 
-  await log("CANDIDATES", "SYSTEM", `${candidates.length} potential runners`);
+  await log("CANDIDATES", "SYSTEM", `${candidates.length} runners`);
 
   for (const c of candidates) {
     if (Object.keys(positions).length >= parseInt(MAX_POS)) break;
     if (positions[c.symbol]) continue;
 
-    // Float check
     let float = 100_000_000;
     try {
       const info = await axios.get(`${M_BASE}/v3/reference/tickers/${c.symbol}?apiKey=${MASSIVE_KEY}`, { timeout: 5000 });
@@ -219,7 +228,6 @@ async function scanLowFloatPennies() {
     } catch {}
     if (float > MAX_FLOAT) continue;
 
-    // Get bars
     let bars = [];
     try {
       const from = new Date(Date.now() - 72*60*60*1000).toISOString().slice(0,10);
@@ -233,8 +241,15 @@ async function scanLowFloatPennies() {
     const high = bars.map(b => b.h);
     const low = bars.map(b => b.l);
     const volume = bars.map(b => b.v);
-    const vwapValues = bars.map((b, i) => (b.h + b.l + b.c) / 3 * b.v);
-    const cumulativeVWAP = vwapValues.reduce((acc, v, i) => acc + v, 0) / volume.reduce((a, b) => a + b, 0);
+
+    // CORRECT VWAP (your fix)
+    let totalPV = 0, totalV = 0;
+    bars.forEach(b => {
+      const tp = (b.h + b.l + b.c) / 3;
+      totalPV += tp * b.v;
+      totalV += b.v;
+    });
+    const cumulativeVWAP = totalPV / totalV;
 
     const rsiValues = RSI({ values: close, period: 14 });
     const currentRSI = rsiValues[rsiValues.length - 1];
@@ -292,7 +307,7 @@ async function scanLowFloatPennies() {
 // START
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, "0.0.0.0", async () => {
-  console.log(`ALPHASTREAM v27.2 FINAL MONSTER LIVE`);
+  console.log(`ALPHASTREAM v27.3 FINAL MONSTER LIVE`);
   await updateEquity();
   await log("BOT_START", "SYSTEM", "RSI Divergence + VWAP + Fixed Trailing + All Fixes");
   scanLowFloatPennies();
