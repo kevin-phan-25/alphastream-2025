@@ -43,4 +43,6 @@ jobs:
             --set-env-vars "MASSIVE_KEY=${{ secrets.MASSIVE_KEY }}" \
             --set-env-vars "LOG_SHEET_ID=${{ secrets.LOG_SHEET_ID }}" \
             --set-env-vars "WEBHOOK_URL=${{ secrets.WEBHOOK_URL }}" \
-            --set-env-vars "WEBHOOK_SECRET=${{ secrets.WEBHOOK_SECRET }}"
+            --set-env-vars "WEBHOOK_SECRET=${{ secrets.WEBHOOK_SECRET }}" \
+            --set-env-vars PREDICTOR_URL=${{ secrets.PREDICTOR_URL }}" \
+            -set-env-vars=DRY_MODE=false
