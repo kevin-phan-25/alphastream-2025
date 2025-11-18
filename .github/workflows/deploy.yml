@@ -1,4 +1,5 @@
 name: Deploy AlphaStream Autopilot
+
 on:
   push:
     branches: [ main ]
@@ -8,9 +9,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-
+      id-token: write  # REQUIRED for Workload Identity Federation (gcloud auth)
+      
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
@@ -28,13 +31,16 @@ jobs:
             --source . \
             --region=us-east1 \
             --project=alphastream-2025 \
+            --platform=managed \
             --allow-unauthenticated \
             --quiet \
             --timeout=60 \
             --memory=512Mi \
-            --set-env-vars=ALPACA_KEY=${{ secrets.ALPACA_KEY }} \
-            --set-env-vars=ALPACA_SECRET=${{ secrets.ALPACA_SECRET }} \
-            --set-env-vars=MASSIVE_KEY=${{ secrets.MASSIVE_KEY }} \
-            --set-env-vars=LOG_SHEET_ID=${{ secrets.LOG_SHEET_ID }} \
-            --set-env-vars=WEBHOOK_URL=${{ secrets.WEBHOOK_URL }} \
-            --set-env-vars=WEBHOOK_SECRET=${{ secrets.WEBHOOK_SECRET }}
+            --max-instances=3 \
+            --min-instances=0 \
+            --set-env-vars "ALPACA_KEY=${{ secrets.ALPACA_KEY }}" \
+            --set-env-vars "ALPACA_SECRET=${{ secrets.ALPACA_SECRET }}" \
+            --set-env-vars "MASSIVE_KEY=${{ secrets.MASSIVE_KEY }}" \
+            --set-env-vars "LOG_SHEET_ID=${{ secrets.LOG_SHEET_ID }}" \
+            --set-env-vars "WEBHOOK_URL=${{ secrets.WEBHOOK_URL }}" \
+            --set-env-vars "WEBHOOK_SECRET=${{ secrets.WEBHOOK_SECRET }}"
