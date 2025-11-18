@@ -1,11 +1,12 @@
-// index.js — AlphaStream v24 ELITE — STARTUP-PROOF FULL ENGINE (Nov 2025)
+// index.js — AlphaStream v24 ELITE — TEST MODE (LOOSENED + DEBUG)
 import express from "express";
 import axios from "axios";
+import { Supertrend, ADX, ATR } from "technicalindicators";
 
 const app = express();
 app.use(express.json());
 
-// CORS — MUST BE FIRST
+// CORS
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -14,34 +15,31 @@ app.use((req, res, next) => {
   next();
 });
 
-// CONSTANTS (moved up — no undefined errors)
+// ENV
+const {
+  ALPACA_KEY = "",
+  ALPACA_SECRET = "",
+  MASSIVE_KEY = "",
+  PREDICTOR_URL = "",
+  LOG_WEBHOOK_URL = "",
+  LOG_WEBHOOK_SECRET = "",
+  FORWARD_SECRET = "",
+  MAX_POS = "3",
+  SCAN_INTERVAL_MS = "45000",
+  DRY_MODE = "false"
+} = process.env;
+
+const DRY_MODE_BOOL = !["false", "0", "no"].includes(String(DRY_MODE).toLowerCase());
 const A_BASE = "https://paper-api.alpaca.markets/v2";
-const M_BASE = "https://api.massive.com";
-
-// ENV VARS — FIXED SYNTAX (no broken FORWARD_SECRET line)
-const ALPACA_KEY = process.env.ALPACA_KEY || "";
-const ALPACA_SECRET = process.env.ALPACA_SECRET || "";
-const MASSIVE_KEY = process.env.MASSIVE_KEY || "";
-const PREDICTOR_URL = process.env.PREDICTOR_URL || "";
-const LOG_WEBHOOK_URL = process.env.LOG_WEBHOOK_URL || "";
-const LOG_WEBHOOK_SECRET = process.env.LOG_WEBHOOK_SECRET || "";
-const FORWARD_SECRET = process.env.FORWARD_SECRET || "";
-const MAX_POS = parseInt(process.env.MAX_POS || "3");
-const SCAN_INTERVAL_MS = parseInt(process.env.SCAN_INTERVAL_MS || "48000");
-const DRY_MODE = process.env.DRY_MODE || "true";
-
-const DRY_MODE_BOOL = !["false", "0", "no", "off"].includes(DRY_MODE.toLowerCase());
-const headers = {
-  "APCA-API-KEY-ID": ALPACA_KEY,
-  "APCA-API-SECRET-KEY": ALPACA_SECRET
-};
+const headers = { "APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET };
 
 let positions = {};
 let scanning = false;
 
-// Logger — fire-and-forget
+// Logging (always console, optional webhook)
 async function log(event, symbol = "", note = "", data = {}) {
-  console.log(`[${event}] ${symbol} | ${note}`, data);
+  const msg = `[${event}] ${symbol} | ${note}`;
+  console.log(msg, data); // Always log to console for debug
   if (!LOG_WEBHOOK_URL || !LOG_WEBHOOK_SECRET) return;
   try {
     await axios.post(LOG_WEBHOOK_URL, { secret: LOG_WEBHOOK_SECRET, event, symbol, note, data }, { timeout: 5000 });
@@ -76,56 +74,58 @@ async function placeOrder(sym, qty, side) {
 }
 
 // Dashboard status
-app.get("/", (req, res) => {
-  res.json({
-    bot: "AlphaStream v24 ELITE",
-    status: "LIVE",
-    time: new Date().toISOString(),
-    positions: Object.keys(positions).length,
-    max_pos: MAX_POS,
-    dry_mode: DRY_MODE_BOOL || !ALPACA_KEY || !PREDICTOR_URL
-  });
-});
-
+app.get("/", (req, res) => res.json({
+  bot: "AlphaStream v24 ELITE", status: "LIVE", time: new Date().toISOString(),
+  positions: Object.keys(positions).length, max_pos: MAX_POS, dry_mode: DRY_MODE_BOOL
+}));
 app.get("/healthz", (_, res) => res.status(200).send("OK"));
 
-// Manual scan
+// Manual trigger
 app.post("/", async (req, res) => {
-  if (FORWARD_SECRET && req.body?.secret !== FORWARD_SECRET) {
-    return res.status(403).json({ error: "forbidden" });
-  }
+  if (FORWARD_SECRET && req.body?.secret !== FORWARD_SECRET) return res.status(403).json({ error: "no" });
   res.json({ status: "SCAN TRIGGERED — FULL SEND" });
   await log("MANUAL_SCAN", "DASHBOARD", "User triggered");
-  scanAndTrade().catch(console.error);
+  scanAndTrade();
 });
 
-// FULL TRADING ENGINE
+// FULL TRADING ENGINE — LOOSED FOR TESTING + DEBUG
 async function scanAndTrade() {
   if (scanning) return;
   scanning = true;
 
   try {
     const hour = new Date().getUTCHours();
-    if (hour < 13 || hour >= 20) return; // 9:30 AM – 4:00 PM ET
+    await log("SCAN_START", "SYSTEM", `Hour ${hour} — market open?`, { hour });
+    if (hour < 13 || hour >= 20) {
+      await log("SCAN_SKIP", "SYSTEM", "Outside market hours");
+      return;
+    }
 
     const equity = await getEquity();
     const maxRiskPerTrade = equity * 0.01;
+    await log("SCAN_EQUITY", "SYSTEM", "Equity loaded", { equity });
 
-    // Cameron Ross gapper list
+    // Cameron Ross gapper list — LOOSED
     const gappersRes = await axios.get(
-      `https://api.massive.com/v2/gappers?min_change=3&min_volume=500000&apiKey=${MASSIVE_KEY}`
+      `https://api.massive.com/v2/gappers?min_change=2&min_volume=300000&apiKey=${MASSIVE_KEY}`
     );
-    const gappers = gappersRes.data.slice(0, 15);
+    const gappers = gappersRes.data.slice(0, 25); // more candidates
+    await log("GAPPERS_FOUND", "SYSTEM", "Gappers loaded", { count: gappers.length });
 
     for (const t of gappers) {
       if (Object.keys(positions).length >= MAX_POS) break;
       if (positions[t.symbol]) continue;
 
+      await log("CANDIDATE", t.symbol, "Analyzing...", { gap: t.change });
+
       const barsRes = await axios.get(
         `https://api.massive.com/v2/aggs/ticker/${t.symbol}/range/1/minute/?adjusted=true&limit=200&apiKey=${MASSIVE_KEY}`
       );
       const bars = barsRes.data.results || [];
-      if (bars.length < 100) continue;
+      if (bars.length < 100) {
+        await log("SKIP_BARS", t.symbol, "Insufficient bars");
+        continue;
+      }
 
       const close = bars.map(b => b.c);
       const high = bars.map(b => b.h);
@@ -143,17 +143,21 @@ async function scanAndTrade() {
         price: close[close.length - 1]
       };
 
-      if (current.adx > 25 && current.stTrend === 1 && current.price > current.stLine) {
+      await log("INDICATORS", t.symbol, "Calculated", current);
+
+      if (current.adx > 20 && current.stTrend === 1 && current.price > current.stLine) {
         const features = [t.change, current.adx, current.atr / current.price];
-        let prob = 0.7;
+        let prob = 0.65; // LOOSED
         if (PREDICTOR_URL) {
           try {
             const ml = await axios.post(`${PREDICTOR_URL}/predict`, { features }, { timeout: 3000 });
-            prob = ml.data.probability || 0.7;
+            prob = ml.data.probability || 0.65;
           } catch {}
         }
 
-        if (prob > 0.78) {
+        await log("ML_SCORE", t.symbol, "ML scored", { prob: (prob*100).toFixed(1) });
+
+        if (prob > 0.65) { // LOOSED
           const risk = current.atr * 1.5;
           const qty = Math.max(1, Math.floor(maxRiskPerTrade / risk));
 
@@ -164,7 +168,7 @@ async function scanAndTrade() {
       }
     }
 
-    await log("HEARTBEAT", "SYSTEM", "Scan complete", {
+    await log("SCAN_COMPLETE", "SYSTEM", "Scan finished", {
       positions: Object.keys(positions).length,
       dry_mode: DRY_MODE_BOOL
     });
@@ -176,7 +180,7 @@ async function scanAndTrade() {
   }
 }
 
-// START — PROOF IT STARTS
+// START
 const PORT = process.env.PORT || 8080;
 const server = app.listen(PORT, "0.0.0.0", async () => {
   console.log(`ALPHASTREAM v24 ELITE FULLY ARMED on port ${PORT}`);
@@ -185,18 +189,5 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
   setInterval(() => scanAndTrade().catch(console.error), Number(SCAN_INTERVAL_MS) || 48000);
 });
 
-// Graceful shutdown
 process.on("SIGTERM", () => server.close(() => process.exit(0)));
 process.on("SIGINT", () => server.close(() => process.exit(0)));
-
-// Silent manual exit endpoint
-app.post("/exit", async (req, res) => {
-  if (req.body?.secret !== FORWARD_SECRET) return res.status(403).send("no");
-  const sym = req.body.symbol;
-  if (positions[sym]) {
-    await placeOrder(sym, positions[sym].qty, "sell");
-    delete positions[sym];
-    await log("MANUAL_EXIT", sym, "Exited via dashboard");
-  }
-  res.json({ status: "exited" });
-});
