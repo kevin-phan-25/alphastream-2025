@@ -18,7 +18,7 @@ app.use((req, res, next) => {
 const {
   ALPACA_KEY = "",
   ALPACA_SECRET = "",
-  MASSIVE_KEY = "uJq_QdVgvrlry9ZpvkIKcs6s2q2qGKtZ",  // ← YOUR KEY
+  MASSIVE_KEY = "",
   PREDICTOR_URL = "",
   LOG_WEBHOOK_URL = "",
   LOG_WEBHOOK_SECRET = "",
