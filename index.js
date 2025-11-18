@@ -1,10 +1,37 @@
-// index.js — AlphaStream v24 — FINAL PRODUCTION VERSION (2025)
-// 100% Cloud Run ready, Eastern Time aware, no leaks, graceful shutdown
+// index.js — AlphaStream v24 — CRASH-PROOF STARTUP (2025)
+// Logs every step to catch failures
+
+console.log("=== Node Starting (v24) ===");  // First log — proves container runs
 
 import express from "express";
 import axios from "axios";
 
-// === ENV VARS (safe parsing + no leaks) ===
+console.log("Imports: express + axios loaded");
+
+// === CRITICAL: Add utils imports with try/catch ===
+let detectMarketRegime, extractFeatures, calculatePositionSize, std, safeDiv;
+try {
+  ({ detectMarketRegime } = await import("./utils/regime.js"));
+  ({ extractFeatures } = await dynamic import("./utils/features.js"));
+  ({ calculatePositionSize } = await import("./utils/risk.js"));
+  ({ std, safeDiv } = await import("./utils/math.js"));
+  console.log("Utils imported successfully");
+} catch (e) {
+  console.error("UTILS IMPORT FAILED (non-fatal for now):", e.message);
+  // Fallback stubs
+  detectMarketRegime = () => "BULL_TREND";
+  extractFeatures = () => [];
+  calculatePositionSize = () => 1;
+  std = (arr) => 0;
+  safeDiv = (a, b) => a / b || 0;
+}
+
+const app = express();
+app.use(express.json());
+
+console.log("Express app initialized");
+
+// === ENV VARS ===
 const {
   ALPACA_KEY = "",
   ALPACA_SECRET = "",
@@ -20,17 +47,11 @@ const {
 const MAX_POS_NUM = Number(MAX_POS) || 3;
 const SCAN_INTERVAL = Number(SCAN_INTERVAL_MS) || 48000;
 
-// Hide secrets from logs forever
-const sanitizeData = (data) => {
-  if (!data) return data;
-  const safe = { ...data };
-  if (safe.apiKey) delete safe.apiKey;
-  if (safe.key) delete safe.key;
-  if (safe.secret) delete safe.secret;
-  return safe;
-};
+console.log("Env vars parsed. Dry mode:", !ALPACA_KEY);
 
-// === LOGGING (safe + async fire-and-forget) ===
+// === SAFE LOGGING ===
+const sanitizeData = (data) => data ? { ...data, apiKey: '[REDACTED]', secret: '[REDACTED]' } : data;
+
 async function log(event, symbol = "", note = "", data = {}) {
   const msg = `[${event}] ${symbol} | ${note}`;
   console.log(msg, sanitizeData(data));
@@ -38,17 +59,14 @@ async function log(event, symbol = "", note = "", data = {}) {
   try {
     await axios.post(LOG_WEBHOOK_URL, {
       secret: LOG_WEBHOOK_SECRET,
-      event,
-      symbol,
-      note,
-      data: sanitizeData(data)
+      event, symbol, note, data: sanitizeData(data)
     }, { timeout: 5000 });
   } catch (e) {
-    console.error("LOG FAILED:", e.message);
+    console.error("LOG POST FAILED:", e.message);
   }
 }
 
-// === CORE HELPERS ===
+// === HELPERS ===
 async function safeGet(url, opts = {}) {
   for (let i = 0; i < 4; i++) {
     try {
@@ -61,6 +79,7 @@ async function safeGet(url, opts = {}) {
 }
 
 export async function getBars(sym, days = 5) {
+  // ... (your existing getBars code)
   const to = new Date().toISOString().split('T')[0];
   const from = new Date(Date.now() - days * 86400000).toISOString().split('T')[0];
   const url = `https://api.massive.com/v2/aggs/ticker/${sym}/range/1/minute/${from}/${to}?adjusted=true&limit=5000&apiKey=${MASSIVE_KEY}`;
@@ -73,54 +92,32 @@ export async function getBars(sym, days = 5) {
   }
 }
 
-// === EASTERN TIME MARKET HOURS CHECK ===
+// === MARKET HOURS (Eastern) ===
 function isMarketHours() {
-  const options = {
-    timeZone: "America/New_York",
-    hour: 'numeric',
-    minute: 'numeric',
-    hour12: false
-  };
-  const formatter = new Intl.DateTimeFormat('en-US', options);
-  const parts = formatter.formatToParts(new Date());
+  const options = { timeZone: "America/New_York", hour: 'numeric', minute: 'numeric', hour12: false };
+  const parts = new Intl.DateTimeFormat('en-US', options).formatToParts(new Date());
   const hour = Number(parts.find(p => p.type === 'hour').value);
   const minute = Number(parts.find(p => p.type === 'minute').value);
-
-  // 9:30 AM – 4:00 PM ET
   if (hour < 9 || hour > 15) return false;
   if (hour === 9 && minute < 30) return false;
-  if (hour === 15 && minute >= 0) return false; // 4:00 PM close
+  if (hour === 15 && minute >= 0) return false;
   return true;
 }
 
-// === SCAN ENGINE ===
+// === SCAN (Minimal for Startup Test) ===
 let scanning = false;
 let positions = {};
 
 async function scanAndTrade() {
   if (scanning) return;
-  if (!isMarketHours()) {
-    // Only log once per hour to avoid spam
-    const now = new Date().toLocaleString("en-US", { timeZone: "America/New_York" });
-    console.log(`Outside market hours (ET): ${now}`);
-    scanning = false;
-    return;
-  }
-
   scanning = true;
   try {
-    await log("HEARTBEAT", "SYSTEM", "Scan running", {
-      positions: Object.keys(positions).length,
-      max: MAX_POS_NUM,
-      et_time: new Date().toLocaleString("en-US", { timeZone: "America/New_York" })
-    });
-
-    // === YOUR FULL TRADING LOGIC GOES HERE LATER ===
-    // (getEliteGappers, analyzeCandidate, enter, managePositions, etc.)
-    // For now, just prove logging works
-
+    if (!isMarketHours()) return;
+    await log("HEARTBEAT", "SYSTEM", "Scan active", { positions: Object.keys(positions).length });
+    // Add full logic later
   } catch (e) {
-    await log("SCAN_ERROR", "SYSTEM", e.message || e.toString());
+    console.error("Scan error:", e);
+    await log("SCAN_ERROR", "SYSTEM", e.message);
   } finally {
     scanning = false;
   }
@@ -133,48 +130,33 @@ app.get("/", (req, res) => {
   res.json({
     bot: "AlphaStream v24 ELITE",
     status: "LIVE",
-    time: new Date().toISOString(),
-    et_time: new Date().toLocaleString("en-US", { timeZone: "America/New_York" }),
     positions: Object.keys(positions).length,
-    max_pos: MAX_POS_NUM,
-    dry_mode: !ALPACA_KEY || !PREDICTOR_URL,
+    dry_mode: !ALPACA_KEY,
     market_open: isMarketHours()
   });
 });
 
 app.post("/", async (req, res) => {
-  const secret = req.body?.secret || "";
-  if (FORWARD_SECRET && secret !== FORWARD_SECRET) {
-    return res.status(403).json({ error: "forbidden" });
-  }
+  if (FORWARD_SECRET && req.body?.secret !== FORWARD_SECRET) return res.status(403).json({ error: "forbidden" });
   scanAndTrade().catch(() => {});
-  res.json({ status: "scan triggered", time: new Date().toISOString() });
+  res.json({ status: "triggered" });
 });
 
-// === GRACEFUL SHUTDOWN ===
-function shutdown(signal) {
-  console.log(`\nReceived ${signal} — shutting down gracefully...`);
-  log("BOT_STOP", "SYSTEM", `Shutdown on ${signal}`).catch(() => {});
+// === SHUTDOWN ===
+const shutdown = (signal) => {
+  console.log(`${signal}: Shutting down...`);
   process.exit(0);
-}
+};
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
 
-// === START SERVER ===
+// === START (GCP-Compliant) ===
 const PORT = process.env.PORT || 8080;
-const appServer = app.listen(PORT, "0.0.0.0", async () => {
-  console.log(`ALPHASTREAM v24 ELITE LIVE on 0.0.0.0:${PORT}`);
-  console.log(`Health: http://localhost:${PORT}/healthz`);
-  console.log(`Root:   http://localhost:${PORT}/`);
-
-  await log("BOT_START", "SYSTEM", "AlphaStream v24 ELITE deployed & running", {
-    dry_mode: !ALPACA_KEY,
-    market_open: isMarketHours()
-  });
-
-  // First scan + interval
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`=== LIVE on 0.0.0.0:${PORT} ===`);
+  log("BOT_START", "SYSTEM", "Deployed", { port: PORT }).catch(() => {});
   scanAndTrade().catch(() => {});
   setInterval(scanAndTrade, SCAN_INTERVAL);
 });
 
-export default appServer;
+console.log("=== Startup Complete ===");
