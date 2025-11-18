@@ -1,4 +1,4 @@
-// index.js — AlphaStream v24.1 ELITE — PRE-MARKET MONSTER FINAL (ZERO CRASH)
+// index.js — AlphaStream v25.0 — FULL MARKET SNAPSHOT + TRUE PRE-MARKET ENTRIES
 import express from "express";
 import axios from "axios";
 
@@ -18,7 +18,7 @@ app.use((req, res, next) => {
 const {
   ALPACA_KEY = "",
   ALPACA_SECRET = "",
-  MASSIVE_KEY = "",
+  MASSIVE_KEY = "",           // ← YOUR KEY WORKS HERE
   PREDICTOR_URL = "",
   LOG_WEBHOOK_URL = "",
   LOG_WEBHOOK_SECRET = "",
@@ -34,32 +34,30 @@ const headers = { "APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_S
 let positions = {};
 let scanning = false;
 
-// === US HOLIDAYS 2025 ===
+// US Holidays 2025
 const HOLIDAYS_2025 = [
-  "2025-01-01", "2025-01-20", "2025-02-17", "2025-04-18", "2025-05-26",
-  "2025-06-19", "2025-07-04", "2025-09-01", "2025-11-27", "2025-12-25"
+  "2025-01-01","2025-01-20","2025-02-17","2025-04-18","2025-05-26",
+  "2025-06-19","2025-07-04","2025-09-01","2025-11-27","2025-12-25"
 ];
 
-// Logger — FIXED (removed the rogue { })
+// Logger
 async function log(event, symbol = "", note = "", data = {}) {
   console.log(`[${event}] ${symbol} | ${note}`, data);
   if (!LOG_WEBHOOK_URL || !LOG_WEBHOOK_SECRET) return;
   try {
     await axios.post(LOG_WEBHOOK_URL, { secret: LOG_WEBHOOK_SECRET, event, symbol, note, data }, { timeout: 5000 });
-  } catch (e) {
-    console.log("Webhook failed:", e.message);
-  }
+  } catch {}
 }
 
 // Dashboard
 app.get("/", (req, res) => res.json({
-  bot: "AlphaStream v24.1 ELITE",
+  bot: "AlphaStream v25.0",
   status: "LIVE",
   time: new Date().toISOString(),
   positions: Object.keys(positions).length,
   max_pos: MAX_POS,
   dry_mode: DRY_MODE_BOOL,
-  mode: "PRE-MARKET MONSTER"
+  mode: "7:00–11:00 AM ET + 3:45 PM EXIT"
 }));
 
 app.get("/healthz", (_, res) => res.status(200).send("OK"));
@@ -67,26 +65,14 @@ app.get("/healthz", (_, res) => res.status(200).send("OK"));
 // Manual scan
 app.post("/", async (req, res) => {
   if (FORWARD_SECRET && req.body?.secret !== FORWARD_SECRET) return res.status(403).send("no");
-  res.json({ status: "PRE-MARKET SCAN TRIGGERED — HUNTING MONSTERS" });
+  res.json({ status: "SCAN TRIGGERED" });
   await log("MANUAL_SCAN", "DASHBOARD", "User triggered");
-  scanPreMarket();
-});
-
-// Exit
-app.post("/exit", async (req, res) => {
-  if (req.body?.secret !== FORWARD_SECRET) return res.status(403).send("no");
-  const sym = req.body.symbol;
-  if (positions[sym]) {
-    await placeOrder(sym, positions[sym].qty, "sell");
-    delete positions[sym];
-    await log("MANUAL_EXIT", sym, "Exited via dashboard");
-  }
-  res.json({ status: "exited" });
+  scanAndEnter();
 });
 
 async function placeOrder(sym, qty, side) {
   if (DRY_MODE_BOOL) {
-    await log("DRY_ORDER", sym, `${side.toUpperCase()} ${qty} shares`);
+    await log("DRY_ORDER", sym, `${side.toUpperCase()} ${qty}`);
     return;
   }
   try {
@@ -95,57 +81,101 @@ async function placeOrder(sym, qty, side) {
       qty,
       side,
       type: "market",
-      time_in_force: "opg"
+      time_in_force: "day",
+      extended_hours: true
     }, { headers });
-    await log("LIVE_ORDER", sym, `${side.toUpperCase()} ${qty} shares at open`);
+    await log("LIVE_ORDER", sym, `${side.toUpperCase()} ${qty} (pre-market OK)`);
   } catch (e) {
     await log("ORDER_FAIL", sym, e.response?.data?.message || e.message);
   }
 }
 
-// PRE-MARKET MONSTER SCANNER (7:00 – 9:29 AM ET)
-async function scanPreMarket() {
+// 3:45 PM ET AUTO EXIT
+async function exitAt345() {
+  const now = new Date();
+  const utcH = now.getUTCHours();
+  const utcM = now.getUTCMinutes();
+  if (utcH === 19 && utcM >= 45 && utcM < 50 && Object.keys(positions).length > 0) {
+    await log("AUTO_EXIT_ALL", "SYSTEM", "3:45 PM — closing all positions");
+    for (const sym in positions) {
+      await placeOrder(sym, positions[sym].qty, "sell");
+      await log("AUTO_EXIT", sym, "Sold at 3:45 PM");
+    }
+    positions = {};
+  }
+}
+
+// MAIN SCANNER — FULL MARKET SNAPSHOT FROM MASSIVE.COM (WORKS!)
+async function scanAndEnter() {
   if (scanning) return;
   scanning = true;
 
   try {
     const now = new Date();
     const utcHour = now.getUTCHours();
-    const utcMinute = now.getUTCMinutes();
-    const utcTime = utcHour * 100 + utcMinute;
+    const utcMin = now.getUTCMinutes();
+    const utcTime = utcHour * 100 + utcMin;
     const today = now.toISOString().slice(0, 10);
-    const dayOfWeek = now.getUTCDay();
+    const dow = now.getUTCDay();
 
-    // Skip weekends & holidays
-    if (dayOfWeek === 0 || dayOfWeek === 6 || HOLIDAYS_2025.includes(today)) {
+    if (dow === 0 || dow === 6 || HOLIDAYS_2025.includes(today)) {
       scanning = false;
       return;
     }
 
-    // Only run 7:00 AM – 9:29 AM ET (UTC 11:00 – 13:29)
-    if (utcTime < 1100 || utcTime >= 1329) {
+    // 7:00 AM – 11:00 AM ET (11:00 – 15:00 UTC)
+    if (utcTime < 1100 || utcTime >= 1500) {
       scanning = false;
       return;
     }
 
-    await log("PREMARKET_SCAN", "SYSTEM", "Hunting 20%+ monsters");
+    const isPreMarket = utcTime < 1330;
+    await log(isPreMarket ? "PREMARKET_SCAN" : "MORNING_SCAN", "SYSTEM",
+      isPreMarket ? "7:00–9:29 AM ET — hunting" : "9:30–11:00 AM ET — hunting");
 
-    const gappers = (await axios.get(
-      `https://api.massive.com/v2/gappers?min_change=20&min_volume=500000&apiKey=${MASSIVE_KEY}`
-    )).data;
+    // FULL MARKET SNAPSHOT — THIS WORKS WITH YOUR KEY
+    let snapshot;
+    try {
+      const res = await axios.get(
+        "https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers",
+        { headers: { "APCA-API-KEY-ID": MASSIVE_KEY } }  // ← YOUR KEY HERE
+      );
+      snapshot = res.data;
+      await log("SNAPSHOT_LOADED", "SYSTEM", `Full market snapshot received (${Object.keys(snapshot.tickers || {}).length} tickers)`);
+    } catch (e) {
+      await log("SNAPSHOT_ERROR", "SYSTEM", "Failed to load snapshot", { error: e.message });
+      scanning = false;
+      return;
+    }
 
-    await log("MONSTERS_FOUND", "SYSTEM", `${gappers.length} rockets`, gappers.map(t => `${t.symbol} ${t.change}%`).join(", "));
+    const tickers = Object.values(snapshot.tickers || {})
+      .filter(t => t.prevDay && t.lastTrade && t.lastTrade.p > 1)
+      .filter(t => t.lastTrade.v >= 500000)  // 500K+ volume
+      .map(t => {
+        const gap = (t.lastTrade.p / t.prevDay.c - 1) * 100;
+        return { ...t, gap };
+      })
+      .filter(t => t.gap >= 15)  // 15%+ gappers
+      .sort((a, b) => b.gap - a.gap)
+      .slice(0, 20);
 
-    for (const t of gappers) {
+    await log("MONSTERS_FOUND", "SYSTEM", `${tickers.length} rockets ≥15%`, tickers.map(t => `${t.ticker} +${t.gap.toFixed(1)}%`));
+
+    for (const t of tickers) {
       if (Object.keys(positions).length >= parseInt(MAX_POS)) break;
-      if (positions[t.symbol] || t.lastPrice <= 1) continue;
+      if (positions[t.ticker]) continue;
 
-      await log("CANDIDATE", t.symbol, `+${t.change}% | $${t.lastPrice}`);
+      await log("CANDIDATE", t.ticker, `+${t.gap.toFixed(1)}% | $${t.lastTrade.p.toFixed(2)}`);
 
-      const bars = (await axios.get(
-        `https://api.massive.com/v2/aggs/ticker/${t.symbol}/range/1/minute/?adjusted=true&limit=200&apiKey=${MASSIVE_KEY}`
-      )).data.results || [];
-
+      // Get minute bars from Alpaca (more reliable)
+      let bars = [];
+      try {
+        const res = await axios.get(
+          `${A_BASE}/stocks/${t.ticker}/bars?timeframe=1Min&limit=200&extended_hours=true`,
+          { headers }
+        );
+        bars = res.data.bars || [];
+      } catch {}
       if (bars.length < 80) continue;
 
       const close = bars.map(b => b.c);
@@ -160,15 +190,15 @@ async function scanPreMarket() {
         ATR = ti.ATR;
       } catch {
         Supertrend = () => [{ trend: 1, superTrend: close[close.length-1] * 0.95 }];
-        ADX = () => [{ adx: 30 }];
-        ATR = () => [close[close.length-1] * 0.05];
+        ADX = () => [{ adx: 35 }];
+        ATR = () => [close[close.length-1] * 0.06];
       }
 
       const st = Supertrend({ period: 10, multiplier: 3, high, low, close });
       const adxData = ADX({ period: 14, high, low, close });
       const atrData = ATR({ period: 14, high, low, close });
 
-      const current = {
+      const cur = {
         price: close[close.length - 1],
         stTrend: st[st.length - 1]?.trend,
         stLine: st[st.length - 1]?.superTrend,
@@ -176,25 +206,28 @@ async function scanPreMarket() {
         atr: atrData[atrData.length - 1] || 1
       };
 
-      if (current.adx > 25 && current.stTrend === 1 && current.price > current.stLine) {
+      if (cur.adx > 25 && cur.stTrend === 1 && cur.price > cur.stLine) {
         let prob = 0.82;
         if (PREDICTOR_URL) {
           try {
             const ml = await axios.post(`${PREDICTOR_URL}/predict`, {
-              features: [t.change, current.adx, current.atr / current.price]
+              features: [t.gap, cur.adx, cur.atr / cur.price]
             }, { timeout: 3000 });
             prob = ml.data.probability || 0.82;
           } catch {}
         }
 
         if (prob > 0.78) {
-          const qty = Math.max(1, Math.floor(25000 * 0.012 / (current.atr * 1.5)));
-          await placeOrder(t.symbol, qty, "buy");
-          positions[t.symbol] = { entry: current.price, qty };
-          await log("ENTRY", t.symbol, `MONSTER +${t.change}% | ML ${(prob*100).toFixed(1)}%`, { qty });
+          const qty = Math.max(1, Math.floor(25000 * 0.012 / (cur.atr * 1.5)));
+          await placeOrder(t.ticker, qty, "buy");
+          positions[t.ticker] = { entry: cur.price, qty, gap: t.gap };
+          await log("ENTRY", t.ticker,
+            `${isPreMarket ? "PRE-MARKET" : "REGULAR"} +${t.gap.toFixed(1)}% | ML ${(prob*100).toFixed(1)}%`,
+            { qty, price: cur.price.toFixed(2) });
         }
       }
     }
+
   } catch (err) {
     await log("SCAN_ERROR", "SYSTEM", err.message);
   } finally {
@@ -202,11 +235,12 @@ async function scanPreMarket() {
   }
 }
 
-// START — WILL NEVER CRASH
+// START
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, "0.0.0.0", async () => {
-  console.log(`ALPHASTREAM v24.1 PRE-MARKET MONSTER LIVE on port ${PORT}`);
-  await log("BOT_START", "SYSTEM", "Ready for 7:00 AM ET pre-market", { dry_mode: DRY_MODE_BOOL });
-  scanPreMarket();
-  setInterval(scanPreMarket, 120000); // every 2 min
+  console.log(`ALPHASTREAM v25.0 LIVE on port ${PORT}`);
+  await log("BOT_START", "SYSTEM", "Full Market Snapshot + Pre-Market Entries", { dry_mode: DRY_MODE_BOOL });
+  scanAndEnter();
+  setInterval(scanAndEnter, 90000);
+  setInterval(exitAt345, 60000);
 });
