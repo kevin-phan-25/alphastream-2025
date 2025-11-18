@@ -1,7 +1,7 @@
-FROM node:20-slim
+FROM node:20-alpine
 WORKDIR /app
 COPY package*.json ./
-RUN npm install
+RUN npm install --only=production
 COPY . .
-CMD ["node", "index.js"]
 EXPOSE 8080
+CMD ["npm", "start"]
