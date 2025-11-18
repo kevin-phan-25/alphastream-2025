@@ -188,3 +188,14 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
 // Graceful shutdown
 process.on("SIGTERM", () => server.close(() => process.exit(0)));
 process.on("SIGINT", () => server.close(() => process.exit(0)));
+
+app.post("/exit", async (req, res) => {
+  if (req.body?.secret !== FORWARD_SECRET) return res.status(403).send("no");
+  const sym = req.body.symbol;
+  if (positions[sym]) {
+    await placeOrder(sym, positions[sym].qty, "sell");
+    delete positions[sym];
+    await log("MANUAL_EXIT", sym, "Dashboard exit");
+  }
+  res.json({ status: "EXITED" });
+});
