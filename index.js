@@ -14,7 +14,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// ENV VARS — NO HARDCODED SECRETS
+// ENV VARS — CLEAN & SAFE
 const {
   ALPACA_KEY = "",
   ALPACA_SECRET = "",
@@ -22,21 +22,19 @@ const {
   PREDICTOR_URL = "",
   LOG_WEBHOOK_URL = "",
   LOG_WEBHOOK_SECRET = "",
-  FORWARD_SECRET = "",           // ← comes from GitHub Secret / Cloud Run env
-    process.env.FORWARD_SECRET || "",   // safe fallback, will be empty if not set
+  FORWARD_SECRET = "",           // ← comes from GitHub Secret / Cloud Run
   MAX_POS = "3",
   SCAN_INTERVAL_MS = "48000",
-  DRY_MODE = "true"               // default to safe mode
+  DRY_MODE = "true"              // default safe mode
 } = process.env;
 
-// Clean DRY_MODE logic
-const DRY_MODE_BOOL = !["false", "0", "no"].includes(String(DRY_MODE).toLowerCase());
+// Proper DRY_MODE handling
+const DRY_MODE_BOOL = !["false", "0", "no", "off"].includes(String(DRY_MODE).toLowerCase());
 
-// Global state
 let positions = {};
 let scanning = false;
 
-// Simple logger
+// Simple logger (fire-and-forget)
 async function log(event, symbol = "", note = "", data = {}) {
   console.log(`[${event}] ${symbol} | ${note}`, data);
 
@@ -49,10 +47,12 @@ async function log(event, symbol = "", note = "", data = {}) {
       note,
       data
     }, { timeout: 5000 });
-  } catch {} // silent fail
+  } catch {
+    // silent fail — never crash the bot
+  }
 }
 
-// ROOT — Dashboard reads this
+// ROOT — Dashboard status
 app.get("/", (req, res) => {
   res.json({
     bot: "AlphaStream v24 ELITE",
@@ -72,19 +72,19 @@ app.post("/", async (req, res) => {
     return res.status(403).json({ error: "forbidden" });
   }
 
-  res.json({ status: "SCAN TRIGGERED — FULL SEND });
+  res.json({ status: "SCAN TRIGGERED — FULL SEND" });
   await log("MANUAL_SCAN", "DASHBOARD", "Triggered by user");
   scanAndTrade().catch(console.error);
 });
 
-// SCAN LOGIC (placeholder – safe even if utils missing)
+// SCAN LOGIC — safe placeholder
 async function scanAndTrade() {
   if (scanning) return;
   scanning = true;
 
   try {
     const hour = new Date().getUTCHours();
-    if (hour < 13 || hour >= 20) return; // 9:30–16:00 ET
+    if (hour < 13 || hour >= 20) return; // 9:30 AM – 4:00 PM ET
 
     await log("HEARTBEAT", "SYSTEM", "Scan running", {
       positions: Object.keys(positions).length,
@@ -92,7 +92,7 @@ async function scanAndTrade() {
     });
 
     // YOUR FULL TRADING LOGIC GOES HERE
-    // Safe to leave empty for now — bot stays alive and shows LIVE
+    // Currently safe: does nothing but keeps bot alive and healthy
 
   } catch (err) {
     await log("SCAN_ERROR", "SYSTEM", err.message);
@@ -106,15 +106,22 @@ const PORT = process.env.PORT || 8080;
 
 const server = app.listen(PORT, "0.0.0.0", async () => {
   console.log(`ALPHASTREAM v24 ELITE LIVE on port ${PORT}`);
-  await log("BOT_START", "SYSTEM", "Deployed successfully", { dry_mode: DRY_MODE_BOOL });
+  await log("BOT_START", "SYSTEM", "Deployed & running", { dry_mode: DRY_MODE_BOOL });
 
-  // Initial scan + scheduler
+  // First scan + safe recurring interval
   scanAndTrade();
-  setInterval(scanAndTrade, Number(SCAN_INTERVAL_MS) || 48000);
+  setInterval(() => {
+    scanAndTrade().catch(console.error);
+  }, Number(SCAN_INTERVAL_MS) || 48000);
 });
 
 // Graceful shutdown
 process.on("SIGTERM", () => {
-  console.log("SIGTERM received – shutting down");
-  server.close();
+  console.log("SIGTERM received – shutting down gracefully");
+  server.close(() => process.exit(0));
+});
+
+process.on("SIGINT", () => {
+  console.log("SIGINT received – shutting down");
+  server.close(() => process.exit(0));
 });
