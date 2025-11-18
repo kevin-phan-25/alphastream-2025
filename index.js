@@ -162,8 +162,14 @@ app.listen(PORT, "0.0.0.0", () => {
   setInterval(scanAndTrade, parseInt(SCAN_INTERVAL_MS, 10) || 48000);
 });
 
+// CORS + OPTIONS preflight fix (critical for dashboard scan button)
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
   next();
 });
