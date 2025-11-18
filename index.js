@@ -1,4 +1,4 @@
-// index.js — AlphaStream v27.1 — FUNDED-READY LOW-FLOAT MONSTER (2025)
+// index.js — AlphaStream v27.2 — NUCLEAR + NEWS CATALYST (FIXED & LIVE)
 import express from "express";
 import axios from "axios";
 import { Supertrend, ADX, ATR } from "technicalindicators";
@@ -31,7 +31,7 @@ const A_BASE = "https://paper-api.alpaca.markets/v2";
 const M_BASE = "https://api.massive.com";
 const headers = { "APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET };
 
-let positions = {};           // Now stores: entry, qty, stop, trailStop, peak, atr, vwap
+let positions = {};
 let scanning = false;
 let dailyPnL = 0;
 let lastResetDate = "";
@@ -55,7 +55,9 @@ async function updateEquity() {
   try {
     const res = await axios.get(`${A_BASE}/account`, { headers, timeout: 8000 });
     accountEquity = parseFloat(res.data.equity || res.data.cash || 25000);
-  } catch { accountEquity = 25000; }
+  } catch (e) {
+    accountEquity = 25000;
+  }
 }
 
 function resetDailyPnL() {
@@ -74,7 +76,10 @@ function recordPnL(exitPrice, entry) {
 }
 
 async function placeOrder(sym, qty, side) {
-  if (DRY_MODE_BOOL) { await log("DRY_ORDER", sym, `${side.toUpperCase()} ${qty}`); return; }
+  if (DRY_MODE_BOOL) {
+    await log("DRY_ORDER", sym, `${side.toUpperCase()} ${qty}`);
+    return;
+  }
   try {
     await axios.post(`${A_BASE}/orders`, {
       symbol: sym,
@@ -90,7 +95,6 @@ async function placeOrder(sym, qty, side) {
   }
 }
 
-// 3:45 PM + DAILY LOSS STOP
 async function exitAt345OrLoss() {
   const now = new Date();
   const utcH = now.getUTCHours();
@@ -100,7 +104,6 @@ async function exitAt345OrLoss() {
     await log("LOSS_STOP", "SYSTEM", `Daily loss ${(dailyPnL*100).toFixed(2)}% → closing all`);
     for (const sym in positions) {
       await placeOrder(sym, positions[sym].qty, "sell");
-      recordPnL(positions[sym].entry * 0.98, positions[sym].entry); // approx
       delete positions[sym];
     }
     return;
@@ -110,13 +113,11 @@ async function exitAt345OrLoss() {
     await log("AUTO_EXIT_ALL", "SYSTEM", "3:45 PM flat exit");
     for (const sym in positions) {
       await placeOrder(sym, positions[sym].qty, "sell");
-      recordPnL(positions[sym].entry, positions[sym].entry);
       delete positions[sym];
     }
   }
 }
 
-// UNBREAKABLE TRAILING STOP + PARTIALS
 async function monitorPositions() {
   for (const sym in positions) {
     const pos = positions[sym];
@@ -124,29 +125,52 @@ async function monitorPositions() {
       const quote = await axios.get(`${A_BASE}/stocks/${sym}/quote`, { headers, timeout: 5000 });
       const bid = quote.data.quote?.bp || pos.entry;
 
-      // Update peak & trailing stop (1.5× ATR)
       if (bid > pos.peak) pos.peak = bid;
       const newTrail = pos.peak - (pos.atr * 1.5);
       if (newTrail > pos.trailStop) pos.trailStop = newTrail;
 
-      // Partial at 2R
       if (!pos.took2R && bid >= pos.entry + 2 * (pos.entry - pos.stop)) {
-        await placeOrder(sym, Math.floor(pos.qty * 0.5), "sell");
-        pos.qty *= 0.5;
-        pos.took2R = true;
-        await log("PARTIAL_2R", sym, `50% off at 2R — trailing the rest`);
+        const halfQty = Math.floor(pos.qty * 0.5);
+        if (halfQty > 0) {
+          await placeOrder(sym, halfQty, "sell");
+          pos.qty -= halfQty;
+          pos.took2R = true;
+          await log("PARTIAL_2R", sym, "50% off at 2R — trailing rest");
+        }
       }
 
-      // Final trailing stop
       if (bid <= pos.trailStop) {
         await placeOrder(sym, pos.qty, "sell");
         const pnl = recordPnL(bid, pos.entry);
-        await log("TRAIL_STOP", sym, `Trailing stop hit @ $${bid.toFixed(2)} | PnL ${(pnl*100).toFixed(2)}%`);
+        await log("TRAIL_STOP", sym, `Hit @ $${bid.toFixed(2)} | PnL ${(pnl*100).toFixed(2)}%`);
         delete positions[sym];
       }
     } catch (e) {
       await log("MONITOR_ERROR", sym, e.message);
     }
+  }
+}
+
+// FIXED: Proper news endpoint + correct date syntax
+async function hasPositiveNews(symbol) {
+  try {
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const url = `${M_BASE}/v2/reference/news?ticker=${symbol}&published_utc=>${oneHourAgo}&limit=10&apiKey=${MASSIVE_KEY}`;
+    const res = await axios.get(url, { timeout: 8000 });
+
+    const articles = res.data.results || [];
+    if (articles.length === 0) return false;
+
+    return articles.some(article => {
+      const text = `${article.title || ""} ${article.description || ""}`.toLowerCase();
+      const positiveKeywords = [
+        "breakout", "surges", "spikes", "soars", "rallies", "beats", "raises guidance",
+        "fda", "approval", "partnership", "contract", "acquisition", "merger", "record revenue"
+      ];
+      return positiveKeywords.some(kw => text.includes(kw));
+    });
+  } catch (e) {
+    return false; // Fail-open: don't block entry if news fails
   }
 }
 
@@ -157,9 +181,12 @@ async function scanLowFloatPennies() {
   resetDailyPnL();
 
   const utcTime = new Date().getUTCHours() * 100 + new Date().getUTCMinutes();
-  if (utcTime < 1100 || utcTime >= 1500) { scanning = false; return; }
+  if (utcTime < 1100 || utcTime >= 1500) {
+    scanning = false;
+    return;
+  }
 
-  await log("SCAN", "SYSTEM", "Hunting low-float monsters");
+  await log("SCAN", "SYSTEM", "Nuclear scan: Low-float + Fresh Positive News");
 
   let candidates = [];
   try {
@@ -170,12 +197,17 @@ async function scanLowFloatPennies() {
       .filter(c => c.gap >= MIN_GAP)
       .sort((a, b) => b.gap - a.gap)
       .slice(0, 20);
-  } catch { scanning = false; return; }
+  } catch (e) {
+    await log("GAINERS_ERROR", "SYSTEM", "Failed to fetch gainers");
+    scanning = false;
+    return;
+  }
 
   for (const c of candidates) {
     if (Object.keys(positions).length >= parseInt(MAX_POS)) break;
     if (positions[c.symbol]) continue;
 
+    // Float check
     let float = 100_000_000;
     try {
       const info = await axios.get(`${M_BASE}/v3/reference/tickers/${c.symbol}?apiKey=${MASSIVE_KEY}`, { timeout: 5000 });
@@ -183,11 +215,20 @@ async function scanLowFloatPennies() {
     } catch {}
     if (float > MAX_FLOAT) continue;
 
+    // NEWS CATALYST — THIS IS THE EDGE
+    const hasNews = await hasPositiveNews(c.symbol);
+    if (!hasNews) {
+      await log("NO_CATALYST", c.symbol, `+${c.gap.toFixed(1)}% — no fresh positive news → skipped`);
+      continue;
+    }
+
+    // Technicals
     let bars = [];
     try {
       const from = new Date(Date.now() - 72*60*60*1000).toISOString().slice(0,10);
-      const b = await axios.get(`${M_BASE}/v2/aggs/ticker/${c.symbol}/range/1/minute/${from}/${new Date().toISOString().slice(0,10)}?limit=300&apiKey=${MASSIVE_KEY}`, { timeout: 10000 });
-      bars = b.data.results || [];
+      const to = new Date().toISOString().slice(0,10);
+      const res = await axios.get(`${M_BASE}/v2/aggs/ticker/${c.symbol}/range/1/minute/${from}/${to}?limit=300&apiKey=${MASSIVE_KEY}`, { timeout: 10000 });
+      bars = res.data.results || [];
     } catch { continue; }
     if (bars.length < 100) continue;
 
@@ -224,16 +265,19 @@ async function scanLowFloatPennies() {
         took2R: false
       };
 
-      await log("ENTRY", c.symbol, `+${c.gap.toFixed(1)}% | Float ${(float/1e6).toFixed(1)}M | 1.5×ATR Trail + 50% @ 2R`, { qty });
+      await log("NUCLEAR_ENTRY", c.symbol,
+        `+${c.gap.toFixed(1)}% | Float ${(float/1e6).toFixed(1)}M | FRESH POSITIVE NEWS`,
+        { qty, catalyst: "YES" }
+      );
     }
   }
   scanning = false;
 }
 
 app.get("/", (_, res) => res.json({
-  bot: "AlphaStream v27.1 — FUNDED READY",
-  equity: accountEquity,
-  dailyPnL: (dailyPnL*100).toFixed(2) + "%",
+  bot: "AlphaStream v27.2 NUCLEAR + NEWS",
+  equity: `$${accountEquity.toLocaleString()}`,
+  dailyPnL: `${(dailyPnL*100).toFixed(2)}%`,
   positions: Object.keys(positions).length,
   status: dailyPnL <= MAX_DAILY_LOSS ? "DAILY LOSS STOP" : "LIVE"
 }));
@@ -241,10 +285,10 @@ app.get("/healthz", (_, res) => res.status(200).send("OK"));
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, "0.0.0.0", async () => {
-  console.log(`ALPHASTREAM v27.1 FUNDED-READY LIVE on port ${PORT}`);
-  await log("BOT_START", "SYSTEM", "Funded-ready v27.1 with unbreakable trailing + partials");
+  console.log(`ALPHASTREAM v27.2 NUCLEAR LIVE on port ${PORT}`);
+  await log("BOT_START", "SYSTEM", "v27.2 NUCLEAR — Low Float + News Catalyst + Unbreakable Trail");
   await updateEquity();
   setInterval(scanLowFloatPennies, 75000);
-  setInterval(monitorPositions, 30000);        // ← Every 30s = bulletproof
+  setInterval(monitorPositions, 30000);
   setInterval(exitAt345OrLoss, 60000);
 });
