@@ -1,31 +1,22 @@
 name: Deploy AlphaStream Autopilot
-
 on:
   push:
     branches: [ main ]
-
 jobs:
   deploy:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-
     steps:
       - uses: actions/checkout@v4
-
-      # Authenticate to GCP
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
-
-      # Setup gcloud SDK
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
         with:
           project_id: alphastream-2025
-
-      # Deploy to Cloud Run
       - name: Deploy to Cloud Run
         run: |
           gcloud run deploy alphastream-autopilot \
@@ -34,8 +25,8 @@ jobs:
             --project=alphastream-2025 \
             --allow-unauthenticated \
             --quiet \
-            --timeout=60 \
-            --memory=512Mi \
+            --timeout=300 \
+            --memory=1Gi \
             --set-env-vars=ALPACA_KEY=${{ secrets.ALPACA_KEY }} \
             --set-env-vars=ALPACA_SECRET=${{ secrets.ALPACA_SECRET }} \
             --set-env-vars=MASSIVE_KEY=${{ secrets.MASSIVE_KEY }} \
@@ -43,4 +34,5 @@ jobs:
             --set-env-vars=WEBHOOK_URL=${{ secrets.WEBHOOK_URL }} \
             --set-env-vars=WEBHOOK_SECRET=${{ secrets.WEBHOOK_SECRET }} \
             --set-env-vars=PREDICTOR_URL=${{ secrets.PREDICTOR_URL }} \
+            --set-env-vars=FORWARD_SECRET=${{ secrets.FORWARD_SECRET }} \
             --set-env-vars=DRY_MODE=false
