@@ -21,7 +21,7 @@ const {
   VIX_API_URL = "",          // optional VIX provider endpoint (GET /vix -> {vix: number})
   LOG_WEBHOOK_URL = "",
   LOG_WEBHOOK_SECRET = "",
-  DRY_MODE = "true",
+  DRY_MODE = "false",
   MAX_POS = "3",
   START_UPGRADE_HOUR_UTC = "03:00", // nightly optimizer run time (UTC)
   RISK_BASE = "0.005",      // base risk per trade (0.5% default)
