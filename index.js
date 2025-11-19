@@ -1,78 +1,61 @@
-// index.js — AlphaStream v30.0 — FUNDING-READY
 import express from "express";
 import cors from "cors";
 import axios from "axios";
 
-// ==================== ENV & CONFIG ====================
-const {
-  ALPACA_KEY = "",
-  ALPACA_SECRET = "",
-  DRY_MODE = "false", // "true" = paper, "false" = live
-  PORT = "8080"
-} = process.env;
-
+const { ALPACA_KEY = "", ALPACA_SECRET = "", DRY_MODE = "false", PORT = "8080" } = process.env;
 const DRY = String(DRY_MODE).toLowerCase() === "true";
-const A_BASE = DRY 
-  ? "https://paper-api.alpaca.markets/v2"
-  : "https://api.alpaca.markets/v2";
-const HEADERS = {
-  "APCA-API-KEY-ID": ALPACA_KEY,
-  "APCA-API-SECRET-KEY": ALPACA_SECRET
-};
+const A_BASE = DRY ? "https://paper-api.alpaca.markets/v2" : "https://api.alpaca.markets/v2";
+const HEADERS = { "APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET };
 
 console.log(`\nAlphaStream v30.0 STARTING`);
 console.log(`Mode → ${DRY ? "PAPER" : "LIVE"}`);
 console.log(`API → ${A_BASE}\n`);
 
-// ==================== STATE ====================
 let accountEquity = 100000;
-let positions = []; // { symbol, qty, entry, current }
+let positions = [];
 let dailyPnL = 0;
 let tradeHistory = [];
 let lastEquityFetch = null;
 let lastScanTime = null;
 
-// ==================== EQUITY & POSITIONS ====================
 async function updateEquity() {
   if (!ALPACA_KEY || !ALPACA_SECRET) {
     accountEquity = 100000;
     return;
   }
-
   try {
     const res = await axios.get(`${A_BASE}/account`, { headers: HEADERS, timeout: 10000 });
     accountEquity = parseFloat(res.data.equity || res.data.cash || 100000);
     lastEquityFetch = new Date().toISOString();
 
-    // Update daily PnL based on positions
-    dailyPnL = positions.reduce((acc, p) => acc + ((p.current || p.entry) - p.entry) * p.qty, 0) / accountEquity;
+    dailyPnL = (positions.length > 0 && accountEquity > 0)
+      ? positions.reduce((acc, p) => acc + ((p.current ?? p.entry) - p.entry) * p.qty, 0) / accountEquity
+      : 0;
+
   } catch (err) {
     console.error("Equity fetch failed:", err?.message || err);
     accountEquity = 100000;
+    dailyPnL = 0;
   }
 }
 
-// Placeholder for positions scan
 async function scanMarket() {
   lastScanTime = new Date().toISOString();
   console.log("Market scan triggered");
-  // Example: Add mock position if none exists
+
   if (positions.length === 0) {
-    positions.push({ symbol: "AAPL", qty: 10, entry: 175, current: 177 });
+    positions = [{ symbol: "AAPL", qty: 10, entry: 175, current: 177 }];
   }
-  // Add to trade history
-  tradeHistory.push({ timestamp: new Date().toISOString(), action: "SCAN", positions: [...positions] });
+
+  tradeHistory = [...tradeHistory, { timestamp: new Date().toISOString(), action: "SCAN", positions: [...positions] }];
 }
 
-// ==================== EXPRESS APP ====================
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Health check
 app.get("/healthz", (req, res) => res.status(200).send("OK"));
 
-// Dashboard endpoint
 app.get("/", async (req, res) => {
   await updateEquity();
   res.json({
@@ -92,7 +75,6 @@ app.get("/", async (req, res) => {
   });
 });
 
-// Manual scan trigger
 app.post("/manual/scan", async (req, res) => {
   try {
     await scanMarket();
@@ -103,7 +85,6 @@ app.post("/manual/scan", async (req, res) => {
   }
 });
 
-// Start server
 const PORT_NUM = parseInt(PORT, 10);
 app.listen(PORT_NUM, "0.0.0.0", () => {
   console.log(`AlphaStream v30.0 LIVE ON PORT ${PORT_NUM}`);
@@ -111,5 +92,4 @@ app.listen(PORT_NUM, "0.0.0.0", () => {
   console.log(`Dashboard URL: https://alphastream-dashboard.vercel.app`);
 });
 
-// Refresh equity every 30s
 setInterval(updateEquity, 30000);
