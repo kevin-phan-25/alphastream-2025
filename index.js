@@ -18,7 +18,7 @@ const {
   NEWS_API_URL = "",
   LOG_WEBHOOK_URL = "",
   LOG_WEBHOOK_SECRET = "",
-  DRY_MODE = "true",
+  DRY_MODE = "false",
   MAX_POS = "3",
   TARGET_SYMBOLS = "SPY,QQQ,NVDA,TQQQ",
   SCAN_INTERVAL_MS = "8000",      // global scan throttle (ms)
