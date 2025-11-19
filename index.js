@@ -75,7 +75,7 @@ app.get("/healthz", (req, res) => res.status(200).send("OK"));
 app.get("/", async (req, res) => {
   await updateEquity();
   res.json({
-    bot: "AlphaStream v30.0 — Elite Mode",
+    bot: "AlphaStream Elite Mode",
     version: "v30.0",
     status: "ONLINE",
     mode: DRY ? "DRY" : "LIVE",
