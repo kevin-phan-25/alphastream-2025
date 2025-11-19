@@ -1,14 +1,14 @@
 {
-  "name": "alphastream-v24",
-  "version": "24.0.0",
+  "name": "alphastream-v29",
+  "version": "0.1.0",
   "type": "module",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "express": "^4.19.2",
-    "axios": "^1.7.7",
-    "technicalindicators": "^3.1.0"
+    "axios": "^1.5.0",
+    "express": "^4.18.2",
+    "technicalindicators": "^3.0.6"
   }
 }
