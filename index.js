@@ -1,144 +1,327 @@
-// index.js — AlphaStream v29.0 — FULLY AUTONOMOUS
-// Features: MTF confluence, regime detection, ML-gating, dynamic sizing, nightly self-optimization
-// Requires Node 18+. Use DRY_MODE=true while testing.
+// index.js — AlphaStream v29.0 — Ultimate Bot (Pro EMA stack + VWAP + ADX anti-chop)
+// Node 18+ recommended. Use DRY_MODE=true for paper runs.
 
 import express from "express";
 import fs from "fs";
 import path from "path";
 import axios from "axios";
 import * as ti from "technicalindicators";
-import crypto from "crypto";
 
 const { EMA: TI_EMA, ATR: TI_ATR, ADX: TI_ADX, Supertrend: TI_Supertrend } = ti;
 
-// ---------- CONFIG / ENV ----------
+// -------- ENV & CONFIG --------
 const {
   ALPACA_KEY = "",
   ALPACA_SECRET = "",
   MASSIVE_KEY = "",
   PREDICTOR_URL = "",
   NEWS_API_URL = "",
-  VIX_API_URL = "",
   LOG_WEBHOOK_URL = "",
   LOG_WEBHOOK_SECRET = "",
-  DRY_MODE = "false",                    // ← NOW RESPECTS ENV (fixed!)
+  DRY_MODE = "true",
   MAX_POS = "3",
-  START_UPGRADE_HOUR_UTC = "03:00",
-  RISK_BASE = "0.005",
-  OPT_WINDOW_DAYS = "45",
   TARGET_SYMBOLS = "SPY,QQQ,NVDA,TQQQ",
+  SCAN_INTERVAL_MS = "8000",      // global scan throttle (ms)
+  PER_SYMBOL_DELAY_MS = "300",    // delay between symbol API calls
+  BACKOFF_BASE_MS = "500",        // base backoff for 429
+  MAX_BACKOFF_MS = "8000",        // max backoff for 429
+  RISK_PER_TRADE = "0.005",       // default 0.5%
+  MAX_DAILY_LOSS = "-0.04",       // -4%
   PORT = "8080"
 } = process.env;
 
-const DRY = String(DRY_MODE).toLowerCase() !== "false";  // ← Works now
-const MAX_POS_NUM = parseInt(MAX_POS, 10) || 3;
-
-// ... rest of your code unchanged ...
-
-// ========== UPDATED ROOT ENDPOINT (DASHBOARD WILL LOVE THIS) ==========
-app.get("/", (_, res) => res.json({
-  bot: "AlphaStream v29.0 — Fully Autonomous",
-  version: "v29.0",
-  status: "ONLINE",
-  mode: DRY ? "DRY" : "LIVE",
-  dry_mode: DRY,
-  max_pos: MAX_POS_NUM,
-  positions: Object.keys(positions).length,
-  equity: `$${Number(accountEquity).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`,
-  dailyPnL: `${(dailyPnL * 100).toFixed(2)}%`,
-  config: CONFIG,
-  tradeHistoryLast5: tradeHistory.slice(-5),
-  timestamp: new Date().toISOString(),
-  uptime: process.uptime()
-}));
-
 const DRY = String(DRY_MODE).toLowerCase() !== "false";
-const RISK_BASE_PCT = parseFloat(RISK_BASE) || 0.005;
-const OPT_WINDOW = parseInt(OPT_WINDOW_DAYS, 10) || 45;
 const TARGETS = TARGET_SYMBOLS.split(",").map(s => s.trim().toUpperCase());
-const APP_PORT = parseInt(PORT, 10) || 8080;
-
 const A_BASE = "https://paper-api.alpaca.markets/v2";
 const M_BASE = "https://api.massive.com";
 const headers = { "APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET };
 
-const defaultConfig = {
-  // hyperparameters the optimizer will tune
-  supertrend_period: 10,
-  supertrend_mult: 3,
-  adx_thresh: 25,
-  atr_multiplier_stop: 2,
-  atr_multiplier_trail: 1.5,
-  ema_short: 9,
-  ema_long: 21,
-  vwap_lookback_minutes: 60,
-  timeframe_confirm_minutes: 5,    // 5-min confirmation timeframe
-  timeframe_trend_minutes: 15      // 15-min higher timeframe trend
-};
-
 const CONFIG_PATH = path.join(process.cwd(), "alphastream29_config.json");
+const defaultConfig = {
+  ema_short: 9,
+  ema_mid: 21,
+  ema_long: 200,
+  adx_thresh: 18,
+  atr_stop_mult: 2,
+  atr_trail_mult: 1.5,
+  vwap_lookback_minutes: 60,
+  timeframe_confirm_minutes: 5,
+  timeframe_trend_minutes: 15,
+  flat_slope_threshold_pct: 0.0015,  // EMA flat if slope < 0.15% over lookback
+  tangled_spread_pct: 0.0025         // EMAs tangled if spread < 0.25%
+};
 if (!fs.existsSync(CONFIG_PATH)) fs.writeFileSync(CONFIG_PATH, JSON.stringify(defaultConfig, null, 2));
 let CONFIG = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
 
-// ---------- STATE ----------
 let accountEquity = 25000;
 let positions = {}; // symbol -> {entry, qty, stop, trailStop, peak, atr, took2R, openAt}
 let dailyPnL = 0;
 let lastResetDate = new Date().toISOString().slice(0,10);
-let tradeHistory = []; // {symbol, entry, exit, pnl, date}
-let scanning = false;
+let tradeHistory = []; // recent trades
+let lastScanTime = 0;
 
-// ---------- UTILITIES ----------
-async function log(event, symbol="", note="", data={}) {
-  console.log(`[${event}] ${symbol} | ${note}`, data);
-  if (LOG_WEBHOOK_URL && LOG_WEBHOOK_SECRET) {
-    try {
-      await axios.post(LOG_WEBHOOK_URL, { secret: LOG_WEBHOOK_SECRET, event, symbol, note, data }, { timeout: 5000 });
-    } catch (e) { /* swallow */ }
+// simple cache and rate-limit helpers
+const cache = new Map();
+function cacheSet(key, val, ttlMs=3000) { cache.set(key, { val, exp: Date.now()+ttlMs }); }
+function cacheGet(key) { const c = cache.get(key); if (!c) return null; if (Date.now()>c.exp) { cache.delete(key); return null; } return c.val; }
+function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
+
+// logging (console + optional webhook)
+async function log(ev, sym="", note="", data={}) {
+  try {
+    console.log(`[${ev}] ${sym} | ${note}`, data);
+    if (LOG_WEBHOOK_URL && LOG_WEBHOOK_SECRET) {
+      await axios.post(LOG_WEBHOOK_URL, { secret: LOG_WEBHOOK_SECRET, event: ev, symbol: sym, note, data }, { timeout: 4000 });
+    }
+  } catch (e) {
+    console.warn("LOG_FAIL", e?.message || e);
   }
 }
 
-function nowISO() { return new Date().toISOString(); }
-
-function resetDailyPnLIfNeeded() {
+function resetDailyIfNeeded(){
   const today = new Date().toISOString().slice(0,10);
-  if (today !== lastResetDate) {
-    dailyPnL = 0;
-    lastResetDate = today;
-    log("DAILY_RESET", "SYSTEM", "PnL reset");
-  }
+  if (today !== lastResetDate) { dailyPnL = 0; lastResetDate = today; log("DAILY_RESET","SYSTEM","Daily reset"); }
 }
+function recordPnL(exit, entry) { const pnl = (exit - entry) / entry; dailyPnL += pnl; return pnl; }
 
-function recordPnL(exitPrice, entry) {
-  const pnl = (exitPrice - entry) / entry;
-  dailyPnL += pnl;
-  return pnl;
-}
-
-async function updateEquity() {
-  if (!ALPACA_KEY || !ALPACA_SECRET) {
-    await log("EQUITY", "SYSTEM", "No Alpaca keys; using fallback", {accountEquity});
-    return;
-  }
+// fetch equity once per scan
+async function updateEquity(){
+  if (!ALPACA_KEY || !ALPACA_SECRET) { await log("EQUITY","SYSTEM","No Alpaca keys - fallback"); return; }
   try {
     const res = await axios.get(`${A_BASE}/account`, { headers, timeout: 8000 });
     accountEquity = parseFloat(res?.data?.equity || res?.data?.cash || accountEquity);
-    await log("EQUITY", "SYSTEM", `$${Number(accountEquity).toLocaleString()}`);
+    await log("EQUITY","SYSTEM",`$${Number(accountEquity).toLocaleString()}`);
   } catch (e) {
-    await log("EQUITY_FAIL", "SYSTEM", e?.message || String(e));
+    await log("EQUITY_FAIL","SYSTEM", e?.message || String(e));
   }
 }
 
+// fetch minute bars using Massive; with caching and 429 backoff
+async function fetchMinuteBars(symbol, limit=500) {
+  const key = `bars:${symbol}:${limit}`;
+  const cached = cacheGet(key);
+  if (cached) return cached;
+  let backoff = parseInt(BACKOFF_BASE_MS,10);
+  while (true) {
+    try {
+      const from = new Date(Date.now() - 7*24*60*60*1000).toISOString().slice(0,10);
+      const to = new Date().toISOString().slice(0,10);
+      const url = `${M_BASE}/v2/aggs/ticker/${symbol}/range/1/minute/${from}/${to}?limit=${limit}&apiKey=${MASSIVE_KEY}`;
+      const res = await axios.get(url, { timeout: 10000 });
+      const bars = res?.data?.results || [];
+      cacheSet(key, bars, 3000);
+      return bars;
+    } catch (e) {
+      const code = e?.response?.status;
+      if (code === 429) {
+        await log("RATE_LIMIT", symbol, `429 - backing off ${backoff}ms`);
+        await sleep(backoff);
+        backoff = Math.min(backoff * 2, parseInt(MAX_BACKOFF_MS || "8000",10));
+        continue;
+      } else {
+        await log("BARS_FAIL", symbol, e?.message || String(e));
+        return [];
+      }
+    }
+  }
+}
+
+// aggregate minute bars to N-minute bars
+function aggregateBars(minuteBars, period) {
+  if (!minuteBars || minuteBars.length === 0) return [];
+  const out = [];
+  // minuteBars newest last; ensure chronological
+  for (let i = 0; i + period <= minuteBars.length; i += period) {
+    const slice = minuteBars.slice(i, i+period);
+    if (slice.length < period) continue;
+    const o = slice[0].o, c = slice[slice.length-1].c;
+    const h = Math.max(...slice.map(x=>x.h)), l = Math.min(...slice.map(x=>x.l));
+    const v = slice.reduce((s,x)=>s+(x.v||0), 0);
+    out.push({ o, h, l, c, v, t: slice[slice.length-1].t });
+  }
+  return out;
+}
+
+// compute VWAP from minute bars
+function computeVWAP(minuteBars) {
+  if (!minuteBars || minuteBars.length === 0) return null;
+  let cumPV = 0, cumV = 0;
+  for (const b of minuteBars) {
+    const tp = (b.h + b.l + b.c) / 3;
+    cumPV += tp * (b.v || 0);
+    cumV += (b.v || 0);
+  }
+  return cumV === 0 ? null : cumPV / cumV;
+}
+
+// detect VWAP rising (simple typical-price increase test)
+function isVWAPRising(minuteBars, lookback = 6) {
+  if (!minuteBars || minuteBars.length < lookback) return false;
+  const seg = minuteBars.slice(-lookback).map(b => (b.h+b.l+b.c)/3);
+  return seg[seg.length-1] > seg[0];
+}
+
+// EMA helpers — use TI_EMA.calculate
+function safeEMA(values, period) {
+  try {
+    if (!values || values.length < period) return [];
+    return TI_EMA.calculate({ period: period, values: values });
+  } catch (e) {
+    return [];
+  }
+}
+
+// check EMA flat: slope of EMA9 over N bars small in pct
+function isEMAFlat(emaValues, lookback=6, thresholdPct = CONFIG.flat_slope_threshold_pct) {
+  if (!emaValues || emaValues.length < lookback+1) return true;
+  const last = emaValues[emaValues.length-1];
+  const prev = emaValues[emaValues.length-1-lookback];
+  if (!prev || prev === 0) return true;
+  const slopePct = Math.abs((last - prev) / prev);
+  return slopePct < thresholdPct;
+}
+
+// check EMAs tangled: small relative spread between EMA9 and EMA21 and EMA21 & EMA200
+function areEMAsTangled(emaShort, emaMid, emaLong, thresholdPct = CONFIG.tangled_spread_pct) {
+  if (!emaShort.length || !emaMid.length || !emaLong.length) return true;
+  const s = emaShort[emaShort.length-1];
+  const m = emaMid[emaMid.length-1];
+  const l = emaLong[emaLong.length-1];
+  if (!s || !m || !l) return true;
+  const spread1 = Math.abs((s - m) / m);
+  const spread2 = Math.abs((m - l) / l);
+  return (spread1 < thresholdPct) || (spread2 < thresholdPct);
+}
+
+// ADX check
+function getADX(highs, lows, closes, period=14) {
+  try {
+    const a = TI_ADX({ period, high: highs, low: lows, close: closes });
+    return a && a.length ? a[a.length-1].adx : 0;
+  } catch (e) { return 0; }
+}
+
+// determine if entry conditions are satisfied for a symbol
+async function evaluateForEntry(symbol) {
+  // throttle symbol calls
+  await sleep(parseInt(PER_SYMBOL_DELAY_MS || "300",10));
+
+  const minuteBars = await fetchMinuteBars(symbol, 600); // last ~600 minutes
+  if (!minuteBars || minuteBars.length < 120) return null;
+
+  // recent minute slices
+  const vwapMinutes = parseInt(CONFIG.vwap_lookback_minutes || 60, 10);
+  const recentMinutes = minuteBars.slice(-vwapMinutes);
+  const vwap = computeVWAP(recentMinutes);
+  if (!vwap) return null;
+  const lastPrice = recentMinutes[recentMinutes.length-1].c;
+  if (lastPrice <= vwap) { await log("VWAP_FAIL", symbol, `price ${lastPrice} <= vwap ${vwap}`); return null; }
+  if (!isVWAPRising(recentMinutes, 6)) { await log("VWAP_NOT_RISE", symbol, "VWAP not rising"); return null; }
+
+  // aggregate to confirm timeframe (5-min) and trend timeframe (15-min)
+  const confirm = aggregateBars(minuteBars.slice(-300), CONFIG.timeframe_confirm_minutes || 5);
+  const trend = aggregateBars(minuteBars.slice(-600), CONFIG.timeframe_trend_minutes || 15);
+  if (confirm.length < 20 || trend.length < 10) return null;
+
+  // build close arrays for EMA and indicators (confirm timeframe)
+  const closesConfirm = confirm.map(b => b.c);
+  const highsConfirm = confirm.map(b => b.h);
+  const lowsConfirm = confirm.map(b => b.l);
+
+  // EMA arrays for confirm timeframe: use closing prices (5-min)
+  const emaShort = safeEMA(closesConfirm, CONFIG.ema_short || 9);    // EMA9
+  const emaMid = safeEMA(closesConfirm, CONFIG.ema_mid || 21);       // EMA21
+
+  // EMA200 should be computed on longer series — use trend timeframe closes
+  const closesTrend = trend.map(b => b.c);
+  const emaLong = safeEMA(closesTrend, CONFIG.ema_long || 200); // EMA200 on 15-min bars
+  // if we can't compute EMA200 (not enough bars), fallback to skipping trade
+  if (!emaShort.length || !emaMid.length || !emaLong.length) return null;
+
+  // flat/tangled checks
+  if (isEMAFlat(emaShort, 6, CONFIG.flat_slope_threshold_pct)) { await log("EMA_FLAT", symbol, "EMA short is flat"); return null; }
+  if (areEMAsTangled(emaShort, emaMid, emaLong, CONFIG.tangled_spread_pct)) { await log("EMA_TANGLED", symbol, "EMAs tangled"); return null; }
+
+  // require EMA9 > EMA21 > EMA200 (stack)
+  const lastEma9 = emaShort[emaShort.length-1];
+  const lastEma21 = emaMid[emaMid.length-1];
+  const lastEma200 = emaLong[emaLong.length-1];
+  if (!(lastEma9 > lastEma21 && lastEma21 > lastEma200)) { await log("EMA_STACK_FAIL", symbol, `E9:${lastEma9} E21:${lastEma21} E200:${lastEma200}`); return null; }
+
+  // ADX on confirm timeframe
+  const adxVal = getADX(highsConfirm, lowsConfirm, closesConfirm, 14);
+  if (adxVal < CONFIG.adx_thresh) { await log("ADX_FAIL", symbol, `ADX ${adxVal} < ${CONFIG.adx_thresh}`); return null; }
+
+  // compute ATR on confirm timeframe for sizing
+  const atrArr = TI_ATR({ period: 14, high: highsConfirm, low: lowsConfirm, close: closesConfirm });
+  const atrVal = atrArr && atrArr.length ? atrArr[atrArr.length-1] : (Math.max(...highsConfirm) - Math.min(...lowsConfirm));
+
+  // optional news/predictor gates
+  if (NEWS_API_URL) {
+    try {
+      const newsRes = await axios.get(`${NEWS_API_URL}?q=${encodeURIComponent(symbol)}&minutes=60`, { timeout: 2500 });
+      const articles = newsRes?.data?.articles || [];
+      if (articles.length === 0) { await log("NEWS_FAIL", symbol, "no recent news"); return null; }
+    } catch (e) {
+      await log("NEWS_CHECK_FAIL", symbol, e?.message || String(e));
+      // non-blocking: allow if news fails
+    }
+  }
+  if (PREDICTOR_URL) {
+    try {
+      const pred = await axios.post(`${PREDICTOR_URL}/predict`, { symbol, features: { vwapDistPct: (lastPrice - vwap)/vwap, adx: adxVal, atr: atrVal } }, { timeout: 3000 });
+      const prob = pred?.data?.probability || pred?.data?.prob || 0;
+      if (prob < 0.62) { await log("PRED_FAIL", symbol, `prob ${prob}`); return null; }
+    } catch (e) {
+      await log("PRED_ERR", symbol, e?.message || String(e));
+      // non-blocking fallback allow
+    }
+  }
+
+  return {
+    symbol,
+    price: lastPrice,
+    vwap,
+    adx: adxVal,
+    atr: atrVal,
+    ema9: lastEma9,
+    ema21: lastEma21,
+    ema200: lastEma200
+  };
+}
+
+// compute quantity given entry price and atr
+function computeQty(entry, atr) {
+  const baseRisk = parseFloat(RISK_PER_TRADE) || 0.005;
+  // performance modifier (simple)
+  const last5 = tradeHistory.slice(-5);
+  const wins = last5.filter(t=>t.pnl > 0).length;
+  let perf = 1.0;
+  if (last5.length >= 3) {
+    if (wins >= 4) perf = 1.3;
+    else if (wins >= 3) perf = 1.1;
+    else if (wins <= 1) perf = 0.8;
+  }
+  // volatility modifier (smaller ATR -> larger size within bounds)
+  const volMod = Math.max(0.6, Math.min(1.6, 1.0 / Math.max(0.2, atr)));
+  const riskPct = Math.max(0.0005, Math.min(0.02, baseRisk * perf * volMod));
+  const riskAmt = accountEquity * riskPct;
+  const stopDistance = atr * CONFIG.atr_stop_mult;
+  const qty = Math.max(1, Math.floor(riskAmt / stopDistance));
+  // cap per symbol (25% of equity)
+  const maxByCap = Math.max(1, Math.floor((accountEquity * 0.25) / Math.max(1, entry)));
+  return Math.min(qty, maxByCap);
+}
+
+// place order wrapper (market)
 async function placeOrder(sym, qty, side) {
   if (DRY) {
-    await log("DRY_ORDER", sym, `${side.toUpperCase()} ${qty}`);
+    await log("DRY_ORDER", sym, `${side} ${qty}`);
     return { dry: true };
   }
   try {
-    const res = await axios.post(`${A_BASE}/orders`, {
-      symbol: sym, qty, side, type: "market", time_in_force: "day", extended_hours: false
-    }, { headers, timeout: 8000 });
-    await log("LIVE_ORDER", sym, `${side.toUpperCase()} ${qty}`, res.data);
+    const res = await axios.post(`${A_BASE}/orders`, { symbol: sym, qty, side, type: "market", time_in_force: "day", extended_hours: false }, { headers, timeout: 8000 });
+    await log("LIVE_ORDER", sym, `${side} ${qty}`, res.data);
     return res.data;
   } catch (e) {
     await log("ORDER_FAIL", sym, e?.response?.data?.message || e?.message || String(e));
@@ -146,323 +329,70 @@ async function placeOrder(sym, qty, side) {
   }
 }
 
-// Simple cache helper for API calls to avoid rate limits
-const cache = new Map();
-function cacheSet(key, val, ttlMs=5000) {
-  cache.set(key, { val, expiry: Date.now() + ttlMs });
-}
-function cacheGet(key) {
-  const c = cache.get(key);
-  if (!c) return null;
-  if (Date.now() > c.expiry) { cache.delete(key); return null; }
-  return c.val;
-}
-
-// ---------- DATA FETCHERS ----------
-async function fetchMinuteBarsMassive(symbol, limit=500) {
-  // caching
-  const cacheKey = `bars:${symbol}:${limit}`;
-  const cached = cacheGet(cacheKey);
-  if (cached) return cached;
-  try {
-    const from = new Date(Date.now() - 7*24*60*60*1000).toISOString().slice(0,10);
-    const to = new Date().toISOString().slice(0,10);
-    const res = await axios.get(`${M_BASE}/v2/aggs/ticker/${symbol}/range/1/minute/${from}/${to}?limit=${limit}&apiKey=${MASSIVE_KEY}`, { timeout: 10000 });
-    const bars = res?.data?.results || [];
-    cacheSet(cacheKey, bars, 5000);
-    return bars;
-  } catch (e) {
-    await log("BARS_FAIL", symbol, e?.message || String(e));
-    return [];
-  }
-}
-
-async function fetchRecentSnapshot(symbol) {
-  // quick snapshot for price/volume — cache for 2s
-  const key = `snap:${symbol}`;
-  const cached = cacheGet(key);
-  if (cached) return cached;
-  try {
-    const res = await axios.get(`${M_BASE}/v2/snapshot/locale/us/markets/stocks/tickers?apiKey=${MASSIVE_KEY}`, { timeout: 6000 });
-    const all = res?.data?.tickers || {};
-    const data = Object.values(all).find(t => t.ticker === symbol) || null;
-    cacheSet(key, data, 2000);
-    return data;
-  } catch (e) {
-    return null;
-  }
-}
-
-// ---------- INDICATORS & HELPERS ----------
-function aggregateBars(minuteBars, periodMinutes) {
-  // minuteBars chronological (old->new)
-  if (!minuteBars || minuteBars.length === 0) return [];
-  const out = [];
-  for (let i = 0; i + periodMinutes <= minuteBars.length; i += periodMinutes) {
-    const slice = minuteBars.slice(i, i + periodMinutes);
-    if (slice.length < periodMinutes) continue;
-    const o = slice[0].o;
-    const c = slice[slice.length-1].c;
-    const h = Math.max(...slice.map(x => x.h));
-    const l = Math.min(...slice.map(x => x.l));
-    const v = slice.reduce((s,x)=>s+(x.v||0),0);
-    out.push({ o, h, l, c, v, t: slice[slice.length-1].t });
-  }
-  return out;
-}
-
-function computeVWAP(minuteBars) {
-  if (!minuteBars || minuteBars.length === 0) return null;
-  let cumPV = 0;
-  let cumV = 0;
-  for (const b of minuteBars) {
-    const tp = (b.h + b.l + b.c) / 3;
-    cumPV += tp * (b.v || 0);
-    cumV += (b.v || 0);
-  }
-  if (cumV === 0) return null;
-  return cumPV / cumV;
-}
-
-function isVWAPRising(minuteBars, lookbackCount=6) {
-  if (!minuteBars || minuteBars.length < lookbackCount) return false;
-  const segments = minuteBars.slice(-lookbackCount).map(b => (b.h + b.l + b.c)/3);
-  return segments[segments.length-1] > segments[0];
-}
-
-// ---------- ML & NEWS GATE ----------
-async function hasFreshPositiveNews(symbol, minutes=60) {
-  if (!NEWS_API_URL) return true;
-  try {
-    const res = await axios.get(`${NEWS_API_URL}?q=${encodeURIComponent(symbol)}&minutes=${minutes}`, { timeout: 3000 });
-    const articles = res?.data?.articles || [];
-    return articles.length > 0;
-  } catch (e) {
-    await log("NEWS_FAIL", symbol, e?.message || String(e));
-    return true;
-  }
-}
-
-async function predictorApprove(features) {
-  if (!PREDICTOR_URL) return { ok: true, prob: 0.85 };
-  try {
-    const res = await axios.post(`${PREDICTOR_URL}/predict`, { features }, { timeout: 3000 });
-    const prob = res?.data?.probability || res?.data?.prob || 0.0;
-    return { ok: prob >= 0.62, prob };
-  } catch (e) {
-    await log("PRED_FAIL", "", e?.message || String(e));
-    return { ok: true, prob: 0.75 }; // non-blocking fallback
-  }
-}
-
-// ---------- REGIME DETECTION ----------
-async function getVIX() {
-  if (!VIX_API_URL) return null;
-  try {
-    const res = await axios.get(`${VIX_API_URL}`, { timeout: 3000 });
-    return res?.data?.vix || null;
-  } catch (e) {
-    return null;
-  }
-}
-
-async function regimeAllowsTrading() {
-  // Basic rules:
-  // - If VIX > 30 => disable new entries
-  // - If SPY ATR (15m) very low => disable
-  // - If dailyPnL <= MAX_DAILY_LOSS (safety) => close and stop (MAX_DAILY_LOSS read from CONFIG or env)
-  const vix = await getVIX();
-  if (vix && vix > 30) {
-    await log("REGIME", "SYSTEM", `VIX ${vix} high — disabling new entries`);
-    return false;
-  }
-  // SPY 15-min ATR check (low volatility kill switch)
-  const spyBars = await fetchMinuteBarsMassive("SPY", 500);
-  if (spyBars.length < 50) return true;
-  const spy15 = aggregateBars(spyBars.slice(-150), 15);
-  if (spy15.length >= 20) {
-    const highs = spy15.map(b=>b.h), lows=spy15.map(b=>b.l), closes=spy15.map(b=>b.c);
-    const atr = TI_ATR({ period: 14, high: highs, low: lows, close: closes });
-    const atrLast = atr[atr.length-1] || 0;
-    if (atrLast < 0.2) { // very low 15-min ATR threshold
-      await log("REGIME", "SYSTEM", `SPY ATR low ${atrLast} — skipping entries`);
-      return false;
-    }
-  }
-  return true;
-}
-
-// ---------- ENTRY EVALUATOR (MTF) ----------
-async function evaluateSymbolForEntry(symbol) {
-  // fetch minute bars
-  const minuteBars = await fetchMinuteBarsMassive(symbol, 500); // old->new
-  if (!minuteBars || minuteBars.length < 120) return null;
-
-  // timeframe aggregation
-  const tTrend = CONFIG.timeframe_trend_minutes || 15;
-  const tConfirm = CONFIG.timeframe_confirm_minutes || 5;
-  const trendBars = aggregateBars(minuteBars.slice(-500), tTrend);
-  const confirmBars = aggregateBars(minuteBars.slice(-200), tConfirm);
-  const recentMinutes = minuteBars.slice(-Math.max(60, CONFIG.vwap_lookback_minutes || 60));
-
-  if (!trendBars.length || !confirmBars.length || !recentMinutes.length) return null;
-
-  // VWAP and rising VWAP
-  const vwap = computeVWAP(recentMinutes);
-  if (!vwap) return null;
-  const lastPrice = recentMinutes[recentMinutes.length-1].c;
-  if (lastPrice <= vwap) return null;
-  if (!isVWAPRising(recentMinutes, 6)) return null;
-
-  // EMA short/long on confirm timeframe
-  const closesConfirm = confirmBars.map(b=>b.c);
-  const emaShort = TI_EMA({ period: CONFIG.ema_short || 9, values: closesConfirm });
-  const emaLong = TI_EMA({ period: CONFIG.ema_long || 21, values: closesConfirm });
-  if (!emaShort.length || !emaLong.length) return null;
-  if (emaShort[emaShort.length-1] <= emaLong[emaLong.length-1]) return null;
-
-  // ADX on confirm timeframe
-  const highs = confirmBars.map(b=>b.h), lows = confirmBars.map(b=>b.l), closes = closesConfirm;
-  const adxData = TI_ADX({ period: 14, high: highs, low: lows, close: closes });
-  const adxLast = adxData[adxData.length-1] ? adxData[adxData.length-1].adx : 0;
-  if (adxLast < CONFIG.adx_thresh) return null;
-
-  // Supertrend optional
-  let stTrend = null;
-  try {
-    const st = TI_Supertrend({ period: CONFIG.supertrend_period, multiplier: CONFIG.supertrend_mult, high: highs, low: lows, close: closes });
-    stTrend = st[st.length-1] ? st[st.length-1].trend : null;
-  } catch (e) { /* ignore */ }
-  if (stTrend !== null && stTrend !== 1) return null;
-
-  // ATR for sizing & stop
-  const atrData = TI_ATR({ period: 14, high: highs, low: lows, close: closes });
-  const atrLast = atrData[atrData.length-1] || Math.max(...highs)-Math.min(...lows);
-
-  // news + ML gating
-  const newsOk = await hasFreshPositiveNews(symbol, 60);
-  if (!newsOk) return null;
-
-  const pickFeatures = {
-    symbol,
-    lastPrice,
-    vwapDistancePct: (lastPrice - vwap) / vwap,
-    adx: adxLast,
-    atr: atrLast
-  };
-  const pred = await predictorApprove(pickFeatures);
-  if (!pred.ok) return null;
-
-  return {
-    symbol,
-    lastPrice,
-    vwap,
-    adx: adxLast,
-    atr: atrLast,
-    predProb: pred.prob
-  };
-}
-
-// ---------- DYNAMIC SIZING ----------
-function computeQty(entryPrice, atr, accountEquityLocal) {
-  // dynamic risk sizing: base risk scaled by short-term performance
-  const baseRisk = RISK_BASE_PCT;
-  // performance modifier: if last 5 trades profitable, increase risk, if losing decrease
-  const last5 = tradeHistory.slice(-5);
-  const wins = last5.filter(t => t.pnl > 0).length;
-  let perfMod = 1.0;
-  if (last5.length >= 3) {
-    if (wins >= 4) perfMod = 1.4;
-    else if (wins >= 3) perfMod = 1.2;
-    else if (wins <= 1) perfMod = 0.8;
-    else perfMod = 1.0;
-  }
-  // volatility modifier: if ATR small, modestly increase size
-  const volMod = Math.min(1.6, Math.max(0.5, 1.0 / (atr * 0.5))); // guard
-  const riskPct = Math.max(0.0005, Math.min(0.02, baseRisk * perfMod * volMod));
-  const riskAmount = accountEquityLocal * riskPct;
-  const stopDistance = atr * (CONFIG.atr_multiplier_stop || 2);
-  let qty = Math.max(1, Math.floor(riskAmount / stopDistance));
-  // anti-over allocation: per-symbol cap at 25% of equity
-  const price = entryPrice || 1;
-  const maxQtyByCap = Math.max(1, Math.floor((accountEquityLocal * 0.25) / price));
-  qty = Math.min(qty, maxQtyByCap);
-  return { qty, riskPct, stopDistance };
-}
-
-// ---------- ENTRY / EXEC ----------
-async function runScanAndEnter() {
-  if (scanning) return;
-  scanning = true;
-  resetDailyPnLIfNeeded();
+// entry scanning loop
+async function scanLoop() {
+  const now = Date.now();
+  const throttle = parseInt(SCAN_INTERVAL_MS || "8000",10);
+  if (now - lastScanTime < throttle) return;
+  lastScanTime = now;
+  resetDailyIfNeeded();
   await updateEquity();
-  const canTrade = await regimeAllowsTrading();
-  if (!canTrade) { scanning = false; return; }
 
-  await log("SCAN_START", "SYSTEM", `scan for ${TARGETS.join(", ")}`, { equity: accountEquity });
+  // check daily loss
+  if (dailyPnL <= parseFloat(MAX_DAILY_LOSS || "-0.04")) {
+    await log("DAILY_STOP","SYSTEM","Daily loss limit hit, skipping new entries");
+    return;
+  }
 
+  await log("SCAN_START","SYSTEM",`scanning ${TARGETS.join(", ")}`, { equity: accountEquity });
   for (const sym of TARGETS) {
+    if (Object.keys(positions).length >= parseInt(MAX_POS || "3", 10)) break;
     try {
-      if (Object.keys(positions).length >= parseInt(MAX_POS,10)) break;
-      if (positions[sym]) continue;
-
-      const pick = await evaluateSymbolForEntry(sym);
+      const pick = await evaluateForEntry(sym);
       if (!pick) continue;
+      const qty = computeQty(pick.price, pick.atr);
+      if (!qty || qty <= 0) continue;
 
-      // compute qty & stop
-      const sizing = computeQty(pick.lastPrice, pick.atr, accountEquity);
-      if (!sizing.qty || sizing.qty <= 0) continue;
+      await placeOrder(sym, qty, "buy");
+      const stop = pick.price - pick.atr * CONFIG.atr_stop_mult;
+      positions[sym] = { entry: pick.price, qty, stop, trailStop: stop, peak: pick.price, atr: pick.atr, took2R: false, openAt: new Date().toISOString() };
+      await log("ENTRY", sym, `entry ${pick.price} qty ${qty} stop ${stop.toFixed(2)} atr ${pick.atr.toFixed(4)}`, { pick });
 
-      // place order
-      await placeOrder(sym, sizing.qty, "buy");
-      const entry = pick.lastPrice;
-      const stop = entry - sizing.stopDistance;
-      positions[sym] = {
-        entry,
-        qty: sizing.qty,
-        stop,
-        trailStop: stop,
-        peak: entry,
-        atr: pick.atr,
-        took2R: false,
-        openAt: nowISO()
-      };
-
-      await log("ENTRY", sym, `entry ${entry} qty ${sizing.qty} stop ${stop.toFixed(2)} riskPct ${(sizing.riskPct*100).toFixed(2)}%`, { pick, sizing });
     } catch (e) {
       await log("SCAN_ERR", sym, e?.message || String(e));
     }
+    // per-symbol delay to avoid rate-limits
+    await sleep(parseInt(PER_SYMBOL_DELAY_MS || "300",10));
   }
-
-  scanning = false;
 }
 
-// ---------- MONITOR & EXIT ----------
-async function monitorOpenPositions() {
+// monitor open positions for trailing stop / partials
+async function monitorLoop() {
   for (const sym of Object.keys(positions)) {
     const pos = positions[sym];
     try {
-      // latest quote
+      // get latest bid
       let bid = pos.entry;
       try {
         const q = await axios.get(`${A_BASE}/stocks/${sym}/quote`, { headers, timeout: 4000 });
         bid = q?.data?.quote?.bp || bid;
-      } catch (e) { /* fallback to last known */ }
+      } catch (e) {
+        // fallback: ignore
+      }
 
-      // update peak & trail
       if (bid > pos.peak) pos.peak = bid;
-      const newTrail = pos.peak - pos.atr * (CONFIG.atr_multiplier_trail || 1.5);
+      const newTrail = pos.peak - pos.atr * (CONFIG.atr_trail_mult || 1.5);
       if (newTrail > pos.trailStop) pos.trailStop = newTrail;
 
-      // take 50% at 2R
-      const twoRlevel = pos.entry + 2 * (pos.entry - pos.stop);
-      if (!pos.took2R && bid >= twoRlevel) {
+      // partial at 2R
+      const twoR = pos.entry + 2 * (pos.entry - pos.stop);
+      if (!pos.took2R && bid >= twoR) {
         const half = Math.floor(pos.qty * 0.5);
         if (half > 0) {
           await placeOrder(sym, half, "sell");
           pos.qty -= half;
           pos.took2R = true;
-          await log("PARTIAL_2R", sym, `50% taken at ${bid.toFixed(2)}`);
+          await log("PARTIAL_2R", sym, `50% sold at ${bid.toFixed(2)}`);
         }
       }
 
@@ -470,7 +400,7 @@ async function monitorOpenPositions() {
       if (bid <= pos.trailStop) {
         await placeOrder(sym, pos.qty, "sell");
         const pnl = recordPnL(bid, pos.entry);
-        tradeHistory.push({ symbol: sym, entry: pos.entry, exit: bid, pnl, date: nowISO() });
+        tradeHistory.push({ symbol: sym, entry: pos.entry, exit: bid, pnl, date: new Date().toISOString() });
         await log("TRAIL_EXIT", sym, `exit ${bid.toFixed(2)} pnl ${(pnl*100).toFixed(2)}%`);
         delete positions[sym];
       }
@@ -480,9 +410,9 @@ async function monitorOpenPositions() {
   }
 }
 
-// close all positions safely
-async function closeAllPositions(reason="manual") {
-  await log("CLOSE_ALL", "SYSTEM", `closing all positions: ${reason}`);
+// close all positions
+async function closeAll(reason="manual") {
+  await log("CLOSE_ALL","SYSTEM",reason);
   for (const sym of Object.keys(positions)) {
     const pos = positions[sym];
     if (pos && pos.qty > 0) await placeOrder(sym, pos.qty, "sell");
@@ -490,177 +420,35 @@ async function closeAllPositions(reason="manual") {
   }
 }
 
-// ---------- NIGHTLY SELF-OPTIMIZER (simple hill-climb) ----------
-async function runSelfOptimization() {
-  await log("OPT_START", "SYSTEM", "Self-optimization starting");
-  // fetch recent trade history and market data
-  // strategy: small local search on a subset of hyperparams: adx_thresh, supertrend_mult, atr_multiplier_stop
-  const base = CONFIG;
-  const searchSpace = [
-    { param: "adx_thresh", vals: [20, 22, 25, 28, 30] },
-    { param: "supertrend_mult", vals: [2.5, 3, 3.5, 4] },
-    { param: "atr_multiplier_stop", vals: [1.5, 2, 2.5, 3] }
-  ];
-  // quick backtest simulator using last OPT_WINDOW days for target symbols (very simplified)
-  const windowDays = OPT_WINDOW;
-  // pull minutebars for each symbol
-  const results = [];
-  for (const sym of TARGETS) {
-    const bars = await fetchMinuteBarsMassive(sym, 2000);
-    if (!bars || bars.length < 500) continue;
-    // simple simulation function: will backtest a couple of parameter combos on aggregated 5-min bars
-    const sim = (cfg) => {
-      // aggregate to 5-min
-      const five = aggregateBars(bars.slice(-1000), 5);
-      if (five.length < 60) return { totalPnL: 0, trades: 0 };
-      // naive backtest: look for EMA crossover + adx>thresh + price>vwap
-      let equity = 0;
-      let trades = 0;
-      for (let i = 30; i < five.length - 5; i++) {
-        const slice = five.slice(0, i);
-        const closes = slice.map(b => b.c);
-        const emaShort = TI_EMA({ period: base.ema_short || 9, values: closes });
-        const emaLong = TI_EMA({ period: base.ema_long || 21, values: closes });
-        if (!emaShort.length || !emaLong.length) continue;
-        const lastShort = emaShort[emaShort.length - 1];
-        const lastLong = emaLong[emaLong.length - 1];
-        // adx
-        const highs = slice.map(b=>b.h), lows = slice.map(b=>b.l);
-        const adxData = TI_ADX({ period: 14, high: highs, low: lows, close: closes });
-        const adx = adxData[adxData.length-1] ? adxData[adxData.length-1].adx : 0;
-        const vwap = computeVWAP(slice.slice(-(base.vwap_lookback_minutes||60)));
-        const priceNow = slice[slice.length-1].c;
-        if (lastShort > lastLong && adx >= cfg.adx_thresh && priceNow > (vwap||0)) {
-          // simulate trade: hold 10 bars ahead and exit at ATR-based stop or end
-          const entry = priceNow;
-          const atrData = TI_ATR({ period: 14, high: highs, low: lows, close: closes });
-          const atr = atrData[atrData.length-1] || 0.5;
-          const stop = entry - atr * cfg.atr_multiplier_stop;
-          let exit = entry;
-          for (let j = 1; j <= 10; j++) {
-            const f = five[i + j];
-            if (!f) break;
-            // if price drops below stop, exit
-            if (f.c <= stop) { exit = f.c; break; }
-            exit = f.c;
-          }
-          const pnl = (exit - entry) / entry;
-          equity += pnl;
-          trades += 1;
-        }
-      }
-      return { totalPnL: equity, trades };
-    };
-
-    // test combinations
-    const combos = [];
-    for (const a of searchSpace[0].vals) for (const b of searchSpace[1].vals) for (const c of searchSpace[2].vals) {
-      combos.push({ adx_thresh: a, supertrend_mult: b, atr_multiplier_stop: c });
-    }
-    let best = null;
-    for (const cfg of combos) {
-      const simRes = sim(cfg);
-      if (!best || simRes.totalPnL > best.totalPnL) best = { cfg, res: simRes };
-    }
-    if (best) results.push({ sym, best });
-  }
-
-  // pick best across symbols (majority vote)
-  const counts = {};
-  for (const r of results) {
-    const key = JSON.stringify(r.best.cfg);
-    counts[key] = (counts[key]||0) + 1;
-  }
-  const bestKey = Object.keys(counts).sort((a,b)=>counts[b]-counts[a])[0];
-  if (bestKey) {
-    const bestCfg = JSON.parse(bestKey);
-    // update CONFIG minimally
-    CONFIG.adx_thresh = bestCfg.adx_thresh || CONFIG.adx_thresh;
-    CONFIG.supertrend_mult = bestCfg.supertrend_mult || CONFIG.supertrend_mult;
-    CONFIG.atr_multiplier_stop = bestCfg.atr_multiplier_stop || CONFIG.atr_multiplier_stop;
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(CONFIG, null, 2));
-    await log("OPT_DONE", "SYSTEM", "Updated CONFIG via optimizer", { updated: bestCfg });
-  } else {
-    await log("OPT_DONE", "SYSTEM", "No optimizer improvement found");
-  }
+// periodic state flush
+function persistState() {
+  try {
+    fs.writeFileSync(path.join(process.cwd(),"alphastream29_state.json"), JSON.stringify({ positions, tradeHistory, dailyPnL, accountEquity }, null, 2));
+  } catch (e) { /* ignore */ }
 }
 
-// schedule optimizer run daily at START_UPGRADE_HOUR_UTC
-function scheduleNightlyOptimizer() {
-  const [hh, mm] = START_UPGRADE_HOUR_UTC.split(":").map(x=>parseInt(x,10));
-  // compute ms to next hh:mm UTC
-  const now = new Date();
-  const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), hh, mm, 0));
-  if (next <= now) next.setUTCDate(next.getUTCDate() + 1);
-  const delay = next - now;
-  setTimeout(async function tick() {
-    try {
-      await runSelfOptimization();
-    } catch (e) { await log("OPT_ERR", "SYSTEM", e?.message || String(e)); }
-    // reschedule 24h
-    setTimeout(tick, 24*60*60*1000);
-  }, delay);
-}
-
-// ---------- SANITY / EXITS ----------
-async function checkDailyLossAndClose() {
-  const MAX_DAILY_LOSS = parseFloat(process.env.MAX_DAILY_LOSS || "-0.08"); // -8% default
-  if (dailyPnL <= MAX_DAILY_LOSS) {
-    await log("DAILY_STOP", "SYSTEM", `Daily loss ${(dailyPnL*100).toFixed(2)}% reached. Closing all.`);
-    await closeAllPositions("daily_loss_stop");
-  }
-}
-
-// ---------- HTTP Server ----------
+// HTTP endpoints
 const app = express();
 app.use(express.json());
-
-app.get("/", (_, res) => res.json({
-  bot: "AlphaStream v29.0 Fully Autonomous",
-  config: CONFIG,
-  equity: `$${Number(accountEquity).toLocaleString()}`,
-  positions: Object.keys(positions).length,
-  dailyPnL: `${(dailyPnL*100).toFixed(2)}%`,
-  tradeHistoryLast5: tradeHistory.slice(-5)
-}));
-
+app.get("/", (_, res) => res.json({ bot: "AlphaStream v29.0 Ultimate", config: CONFIG, equity: accountEquity, positions: Object.keys(positions).length, dailyPnL }));
 app.get("/healthz", (_, res) => res.status(200).send("OK"));
+app.post("/scan", async (req, res) => { runSafe(scanLoop); res.json({ status: "scan_started" }); });
+app.post("/close", async (req, res) => { await closeAll("api_close"); res.json({ status: "closed" }); });
 
-app.post("/manual/scan", async (req, res) => {
-  await log("MANUAL", "SYSTEM", "Manual scan triggered");
-  runScanAndEnter().catch(e=>log("ERR","MANUAL_SCAN",e?.message||String(e)));
-  res.json({ status: "scan_triggered" });
-});
+// helper to run loops safely
+async function runSafe(fn) { try { await fn(); } catch (e) { await log("LOOP_ERR","SYSTEM", e?.message || String(e)); } }
 
-app.post("/manual/close", async (req, res) => {
-  await closeAllPositions("manual_api");
-  res.json({ status: "closed" });
-});
-
-app.post("/config/reload", async (req, res) => {
-  try {
-    CONFIG = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
-    res.json({ status: "reloaded", config: CONFIG });
-  } catch (e) {
-    res.status(500).json({ error: e?.message || String(e) });
-  }
-});
-
-// ---------- STARTUP SCHEDULE ----------
+// bootstrap & main timers
 async function bootstrap() {
-  await log("BOOT", "SYSTEM", "Starting AlphaStream v29.0");
-  try { CONFIG = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8")); } catch(e) { fs.writeFileSync(CONFIG_PATH, JSON.stringify(defaultConfig, null,2)); CONFIG = defaultConfig; }
+  await log("BOOT","SYSTEM","AlphaStream v29.0 starting");
+  try { CONFIG = JSON.parse(fs.readFileSync(CONFIG_PATH,"utf8")); } catch (e) { fs.writeFileSync(CONFIG_PATH, JSON.stringify(defaultConfig,null,2)); CONFIG = defaultConfig; }
   await updateEquity();
-  scheduleNightlyOptimizer();
   // main loops
-  setInterval(async ()=>{ try { await runScanAndEnter(); } catch(e){ await log("SCAN_LOOP_ERR","SYSTEM",e?.message||String(e)); } }, 60*1000);
-  setInterval(async ()=>{ try { await monitorOpenPositions(); await checkDailyLossAndClose(); } catch(e){ await log("MONITOR_LOOP_ERR","SYSTEM",e?.message||String(e)); } }, 15*1000);
-  // minimalist health monitor (persist tradehistory)
-  setInterval(()=>{ try { fs.writeFileSync(path.join(process.cwd(),"alphastream29_state.json"), JSON.stringify({ positions, tradeHistory, dailyPnL, accountEquity }, null, 2)); } catch(e){ } }, 30*1000);
+  setInterval(() => runSafe(scanLoop), Math.max(1000, parseInt(SCAN_INTERVAL_MS || "8000",10)));
+  setInterval(() => runSafe(monitorLoop), 15000);
+  setInterval(() => { resetDailyIfNeeded(); persistState(); }, 30000);
 }
 
-// start server & bootstrap
-app.listen(APP_PORT, "0.0.0.0", async () => {
-  console.log(`ALPHASTREAM v29.0 — listening on ${APP_PORT}`);
-  await bootstrap();
-});
+// start server
+const PORT_NUM = parseInt(PORT || "8080",10);
+app.listen(PORT_NUM, "0.0.0.0", async () => { console.log("AlphaStream v29.0 listening on", PORT_NUM); await bootstrap(); });
