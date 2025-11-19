@@ -1,4 +1,4 @@
-// index.js — AlphaStream v30.0 — FULL POSITION DATA + CLICKABLE
+// index.js — AlphaStream v30.0 — FINAL WORKING VERSION (NO CRASHES)
 import express from "express";
 import cors from "cors";
 import axios from "axios";
@@ -25,11 +25,15 @@ const HEADERS = {
   "APCA-API-SECRET-KEY": ALPACA_SECRET
 };
 
-// STATE
-let accountEquity =  = 100000;
-let positions = []; // Now stores full Alpaca position objects
+console.log(`\nAlphaStream v30.0 ELITE STARTING`);
+console.log(`Mode → ${DRY ? "DRY (Paper)" : "LIVE (Real Money)"}`);
+
+// STATE — FIXED: Removed double =
+let accountEquity = 100000;
+let positions = [];
 let lastEquityFetch = null;
 
+// FETCH EQUITY + POSITIONS FROM ALPACA
 async function updateEquityAndPositions() {
   if (!ALPACA_KEY || !ALPACA_SECRET) {
     accountEquity = 100000;
@@ -39,8 +43,8 @@ async function updateEquityAndPositions() {
 
   try {
     const [accountRes, positionsRes] = await Promise.all([
-      axios.get(`${A_BASE}/account`, { headers: HEADERS, timeout: 10000 }),
-      axios.get(`${A_BASE}/positions`, { headers: HEADERS, timeout: 10000 })
+      axios.get(`${A_BASE}/account`, { headers: HEADERS, timeout: 12000 }),
+      axios.get(`${A_BASE}/positions`, { headers: HEADERS, timeout: 12000 })
     ]);
 
     accountEquity = parseFloat(accountRes.data.equity || 100000);
@@ -49,27 +53,28 @@ async function updateEquityAndPositions() {
       qty: Number(p.qty),
       entry: parseFloat(p.avg_entry_price),
       current: parseFloat(p.current_price || p.market_value / p.qty),
-      market_value),
       market_value: parseFloat(p.market_value),
       unrealized_pl: parseFloat(p.unrealized_pl),
-      unrealized_plpc: parseFloat(p.unrealized_plpc) * 100 // in %
+      unrealized_plpc: parseFloat(p.unrealized_plpc) * 100
     }));
 
     lastEquityFetch = new Date().toISOString();
   } catch (err) {
-    console.error("Alpaca fetch failed:", err?.response?.data?.message || err.message);
-    // Keep old data on failure
+    console.error("Alpaca fetch error:", err?.response?.data || err.message);
   }
 }
 
-// Initial fetch
+// INITIAL FETCH
 await updateEquityAndPositions();
 
-// Dashboard endpoint — NOW INCLUDES FULL POSITIONS ARRAY
+// DASHBOARD ENDPOINT — FULL POSITIONS ARRAY
 app.get("/", async (req, res) => {
   await updateEquityAndPositions();
+  const totalPnL = positions.reduce((sum, p) => sum + p.unrealized_pl, 0);
+  const dailyPnLPercent = accountEquity > 0 ? ((totalPnL / (accountEquity - totalPnL)) * 100).toFixed(2) : "0.00";
+
   res.json({
-    bot: "AlphaStream Elite Mode",
+    bot: "AlphaStream v30.0 — Elite Mode",
     version: "v30.0",
     status: "ONLINE",
     mode: DRY ? "DRY" : "LIVE",
@@ -77,8 +82,8 @@ app.get("/", async (req, res) => {
     positions_count: positions.length,
     max_pos: 5,
     equity: `$${accountEquity.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
-    dailyPnL: positions.reduce((sum, p) => sum + p.unrealized_pl, 0).toFixed(2) + "%",
-    positions: positions, // ← FULL DETAILS FOR DASHBOARD
+    dailyPnL: `${totalPnL >= 0 ? "+" : ""}${dailyPnLPercent}%`,
+    positions: positions, // FULL DETAILS FOR MODAL
     lastEquityFetch,
     timestamp: new Date().toISOString()
   });
@@ -93,9 +98,9 @@ app.post("/manual/scan", async (req, res) => {
 
 const PORT_NUM = parseInt(PORT, 10);
 app.listen(PORT_NUM, "0.0.0.0", () => {
-  console.log(`\nAlphaStream v30.0 ELITE LIVE ON PORT ${PORT_NUM}`);
-  console.log(`Mode: ${DRY ? "DRY (Paper)" : "LIVE (Real Money)"}`);
+  console.log(`\nALPHASTREAM v30.0 ELITE LIVE ON PORT ${PORT_NUM}`);
+  console.log(`Dashboard → https://alphastream-dashboard.vercel.app`);
 });
 
-// Refresh every 15 seconds
+// Auto-refresh every 15 seconds
 setInterval(updateEquityAndPositions, 15000);
