@@ -427,28 +427,57 @@ function persistState() {
   } catch (e) { /* ignore */ }
 }
 
-// HTTP endpoints
+// ---------- HTTP Server ----------
 const app = express();
 app.use(express.json());
-app.get("/", (_, res) => res.json({ bot: "AlphaStream v29.0 Ultimate", config: CONFIG, equity: accountEquity, positions: Object.keys(positions).length, dailyPnL }));
+app.get("/", (_, res) => res.json({
+  bot: "AlphaStream v29.0 Fully Autonomous",
+  version: "v29.0",
+  status: "ONLINE",  // ← ADDED: Dashboard needs this for green status
+  mode: DRY ? "DRY" : "LIVE",  // ← ADDED: Shows LIVE if DRY=false
+  dry_mode: DRY,  // ← ADDED: Dashboard reads this for warning
+  max_pos: parseInt(MAX_POS, 10),
+  positions: Object.keys(positions).length,
+  equity: `$${Number(accountEquity).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`,
+  dailyPnL: `${(dailyPnL * 100).toFixed(2)}%`,
+  config: CONFIG,
+  tradeHistoryLast5: tradeHistory.slice(-5),
+  timestamp: new Date().toISOString()  // ← ADDED: Proves it's live
+}));
 app.get("/healthz", (_, res) => res.status(200).send("OK"));
-app.post("/scan", async (req, res) => { runSafe(scanLoop); res.json({ status: "scan_started" }); });
-app.post("/close", async (req, res) => { await closeAll("api_close"); res.json({ status: "closed" }); });
+app.post("/manual/scan", async (req, res) => {
+  await log("MANUAL", "SYSTEM", "Manual scan triggered");
+  runScanAndEnter().catch(e=>log("ERR","MANUAL_SCAN",e?.message||String(e)));
+  res.json({ status: "scan_triggered" });
+});
+app.post("/manual/close", async (req, res) => {
+  await closeAllPositions("manual_api");
+  res.json({ status: "closed" });
+});
+app.post("/config/reload", async (req, res) => {
+  try {
+    CONFIG = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
+    res.json({ status: "reloaded", config: CONFIG });
+  } catch (e) {
+    res.status(500).json({ error: e?.message || String(e) });
+  }
+});
 
-// helper to run loops safely
-async function runSafe(fn) { try { await fn(); } catch (e) { await log("LOOP_ERR","SYSTEM", e?.message || String(e)); } }
-
-// bootstrap & main timers
+// ---------- STARTUP SCHEDULE ----------
 async function bootstrap() {
-  await log("BOOT","SYSTEM","AlphaStream v29.0 starting");
-  try { CONFIG = JSON.parse(fs.readFileSync(CONFIG_PATH,"utf8")); } catch (e) { fs.writeFileSync(CONFIG_PATH, JSON.stringify(defaultConfig,null,2)); CONFIG = defaultConfig; }
+  await log("BOOT", "SYSTEM", "Starting AlphaStream v29.0");
+  try { CONFIG = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8")); } catch(e) { fs.writeFileSync(CONFIG_PATH, JSON.stringify(defaultConfig, null,2)); CONFIG = defaultConfig; }
   await updateEquity();
+  scheduleNightlyOptimizer();
   // main loops
-  setInterval(() => runSafe(scanLoop), Math.max(1000, parseInt(SCAN_INTERVAL_MS || "8000",10)));
-  setInterval(() => runSafe(monitorLoop), 15000);
-  setInterval(() => { resetDailyIfNeeded(); persistState(); }, 30000);
+  setInterval(async ()=>{ try { await runScanAndEnter(); } catch(e){ await log("SCAN_LOOP_ERR","SYSTEM",e?.message||String(e)); } }, 60*1000);
+  setInterval(async ()=>{ try { await monitorOpenPositions(); await checkDailyLossAndClose(); } catch(e){ await log("MONITOR_LOOP_ERR","SYSTEM",e?.message||String(e)); } }, 15*1000);
+  // minimalist health monitor (persist tradehistory)
+  setInterval(()=>{ try { fs.writeFileSync(path.join(process.cwd(),"alphastream29_state.json"), JSON.stringify({ positions, tradeHistory, dailyPnL, accountEquity }, null, 2)); } catch(e){ } }, 30*1000);
 }
 
-// start server
-const PORT_NUM = parseInt(PORT || "8080",10);
-app.listen(PORT_NUM, "0.0.0.0", async () => { console.log("AlphaStream v29.0 listening on", PORT_NUM); await bootstrap(); });
+// start server & bootstrap
+app.listen(APP_PORT, "0.0.0.0", async () => {
+  console.log(`ALPHASTREAM v29.0 — listening on ${APP_PORT}`);
+  await bootstrap();
+});
