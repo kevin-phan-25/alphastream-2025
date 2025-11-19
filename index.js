@@ -642,3 +642,17 @@ app.listen(APP_PORT, "0.0.0.0", async () => {
   console.log(`ALPHASTREAM v29.0 — listening on ${APP_PORT}`);
   await bootstrap();
 });
+
+app.get("/", (_, res) => res.json({
+  bot: "AlphaStream v29.0 — Fully Autonomous",
+  version: "v29.0",
+  status: "ONLINE",                    // ← NEW
+  mode: DRY ? "DRY" : "LIVE",           // ← NEW (auto-detects!)
+  max_pos: parseInt(MAX_POS, 10),
+  positions: Object.keys(positions).length,
+  equity: `$${Number(accountEquity).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`,
+  dailyPnL: `${(dailyPnL * 100).toFixed(2)}%`,
+  config: CONFIG,
+  tradeHistoryLast5: tradeHistory.slice(-5),
+  timestamp: new Date().toISOString()  // ← proves it's live
+}));
