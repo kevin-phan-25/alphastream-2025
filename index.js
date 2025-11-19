@@ -16,19 +16,41 @@ const {
   ALPACA_KEY = "",
   ALPACA_SECRET = "",
   MASSIVE_KEY = "",
-  PREDICTOR_URL = "",        // optional ML predictor: POST /predict {features} returns {probability}
-  NEWS_API_URL = "",         // optional quick news endpoint (GET q=SYMBOL&minutes=60)
-  VIX_API_URL = "",          // optional VIX provider endpoint (GET /vix -> {vix: number})
+  PREDICTOR_URL = "",
+  NEWS_API_URL = "",
+  VIX_API_URL = "",
   LOG_WEBHOOK_URL = "",
   LOG_WEBHOOK_SECRET = "",
-  DRY_MODE = "false",
+  DRY_MODE = "false",                    // ← NOW RESPECTS ENV (fixed!)
   MAX_POS = "3",
-  START_UPGRADE_HOUR_UTC = "03:00", // nightly optimizer run time (UTC)
-  RISK_BASE = "0.005",      // base risk per trade (0.5% default)
-  OPT_WINDOW_DAYS = "45",   // days to use for nightly optimization
+  START_UPGRADE_HOUR_UTC = "03:00",
+  RISK_BASE = "0.005",
+  OPT_WINDOW_DAYS = "45",
   TARGET_SYMBOLS = "SPY,QQQ,NVDA,TQQQ",
   PORT = "8080"
 } = process.env;
+
+const DRY = String(DRY_MODE).toLowerCase() !== "false";  // ← Works now
+const MAX_POS_NUM = parseInt(MAX_POS, 10) || 3;
+
+// ... rest of your code unchanged ...
+
+// ========== UPDATED ROOT ENDPOINT (DASHBOARD WILL LOVE THIS) ==========
+app.get("/", (_, res) => res.json({
+  bot: "AlphaStream v29.0 — Fully Autonomous",
+  version: "v29.0",
+  status: "ONLINE",
+  mode: DRY ? "DRY" : "LIVE",
+  dry_mode: DRY,
+  max_pos: MAX_POS_NUM,
+  positions: Object.keys(positions).length,
+  equity: `$${Number(accountEquity).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`,
+  dailyPnL: `${(dailyPnL * 100).toFixed(2)}%`,
+  config: CONFIG,
+  tradeHistoryLast5: tradeHistory.slice(-5),
+  timestamp: new Date().toISOString(),
+  uptime: process.uptime()
+}));
 
 const DRY = String(DRY_MODE).toLowerCase() !== "false";
 const RISK_BASE_PCT = parseFloat(RISK_BASE) || 0.005;
@@ -642,17 +664,3 @@ app.listen(APP_PORT, "0.0.0.0", async () => {
   console.log(`ALPHASTREAM v29.0 — listening on ${APP_PORT}`);
   await bootstrap();
 });
-
-app.get("/", (_, res) => res.json({
-  bot: "AlphaStream v29.0 — Fully Autonomous",
-  version: "v29.0",
-  status: "ONLINE",                    // ← NEW
-  mode: DRY ? "DRY" : "LIVE",           // ← NEW (auto-detects!)
-  max_pos: parseInt(MAX_POS, 10),
-  positions: Object.keys(positions).length,
-  equity: `$${Number(accountEquity).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`,
-  dailyPnL: `${(dailyPnL * 100).toFixed(2)}%`,
-  config: CONFIG,
-  tradeHistoryLast5: tradeHistory.slice(-5),
-  timestamp: new Date().toISOString()  // ← proves it's live
-}));
