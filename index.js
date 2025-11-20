@@ -1,4 +1,5 @@
-// index.js — AlphaStream v36.2 — REAL EXIT LOGIC + PROFIT TAKING + STOP LOSS
+// index.js — AlphaStream v37.0 — PROP FIRM CHALLENGE CRUSHER (Paper → Funded)
+// 7.5%+ gainers, 800k+ volume, max 4 positions, daily loss limit, bulletproof exits
 import express from "express";
 import cors from "cors";
 import axios from "axios";
@@ -10,8 +11,8 @@ app.use(express.json());
 const {
   ALPACA_KEY = "",
   ALPACA_SECRET = "",
-  MASSIVE_KEY = "",           // ← YOUR MASSIVE.COM API KEY
-  DRY_MODE = "false",
+  MASSIVE_KEY = "",           // YOUR MASSIVE.COM API KEY
+  DRY_MODE = "true",          // SET TO "false" ONLY WHEN ON REAL PROP ACCOUNT
   PORT = "8080"
 } = process.env;
 
@@ -26,16 +27,17 @@ const HEADERS = {
   "APCA-API-SECRET-KEY": ALPACA_SECRET
 };
 
-console.log(`\nALPHASTREAM v36.2 — MASSIVE.COM + REAL EXITS (TP/SL + EOD)`);
-console.log(`Mode → ${DRY ? "DRY (Paper)" : "LIVE (Real Money)"}\n`);
+console.log(`\nALPHASTREAM v37.0 — PROP FIRM CHALLENGE CRUSHER`);
+console.log(`Mode → ${DRY ? "PAPER (Challenge Mode)" : "LIVE (Real Money)"}\n`);
 
 // ==================== STATE ====================
 let accountEquity = 100000;
+let startingEquityToday = 100000;
 let positions = [];
 let tradeLog = [];
 let backtestResults = { wins: 0, losses: 0, totalPnL: 0, trades: 0 };
 
-// ==================== LOGGING + WIN RATE ====================
+// ==================== LOGGING ====================
 function logTrade(type, symbol, qty, price, reason = "") {
   const trade = {
     id: Date.now() + Math.random().toString(36).substr(2, 9),
@@ -50,7 +52,7 @@ function logTrade(type, symbol, qty, price, reason = "") {
   if (type === "EXIT") {
     const entry = tradeLog.findLast(t => t.type === "ENTRY" && t.symbol === symbol);
     if (entry) {
-      const pnl = (price - entry.price) * qty * (entry.side === "sell" ? -1 : 1);
+      const pnl = (price - entry.price) * qty;
       const pnlPct = ((pnl / (entry.price * qty)) * 100).toFixed(2);
       trade.pnl = pnl.toFixed(2);
       trade.pnlPct = pnlPct;
@@ -63,61 +65,67 @@ function logTrade(type, symbol, qty, price, reason = "") {
   }
 
   tradeLog.push(trade);
-  if (tradeLog.length > 200) tradeLog.shift();
+  if (tradeLog.length > 300) tradeLog.shift();
 
   console.log(`[${type}] ${qty} ${symbol} @ $${price} | ${reason} ${type === "EXIT" ? `| P&L: $${trade.pnl} (${trade.pnlPct}%)` : ""}`);
 }
 
-// ==================== ORDER EXECUTION ====================
-async function placeOrder(symbol, qty, side = "buy") {
+// ==================== ORDERS ====================
+async function placeOrder(symbol, qty) {
   if (DRY) {
-    logTrade("ENTRY", symbol, qty, "market", "DRY MODE");
-    positions.push({ symbol, qty, entry: "market", current: "market" });
+    logTrade("ENTRY", symbol, qty, "market", "Momentum Signal");
+    positions.push({ symbol, qty, entry: 999, current: 999 });
     return;
   }
   try {
     const res = await axios.post(`${A_BASE}/orders`, {
       symbol,
       qty,
-      side,
+      side: "buy",
       type: "market",
       time_in_force: "day"
     }, { headers: HEADERS, timeout: 10000 });
 
-    const filledPrice = res.data.filled_avg_price || "market";
-    logTrade("ENTRY", symbol, qty, filledPrice, "Massive Momentum Signal");
-    return res.data;
+    const price = res.data.filled_avg_price || "market";
+    logTrade("ENTRY", symbol, qty, price, "Momentum Signal");
   } catch (err) {
     console.log("Order failed:", err?.response?.data?.message || err.message);
   }
 }
 
-async function closePosition(symbol) {
+async function closePosition(symbol, reason = "EOD/TP/SL") {
   const pos = positions.find(p => p.symbol === symbol);
   if (!pos) return;
 
   if (DRY) {
-    logTrade("EXIT", symbol, pos.qty, pos.current || pos.entry, pos.reason || "Manual Close");
+    logTrade("EXIT", symbol, pos.qty, pos.current || pos.entry, reason);
     positions = positions.filter(p => p.symbol !== symbol);
     return;
   }
 
   try {
     await axios.delete(`${A_BASE}/positions/${symbol}`, { headers: HEADERS });
-    logTrade("EXIT", symbol, pos.qty, pos.current, pos.reason || "EOD/TP/SL");
+    logTrade("EXIT", symbol, pos.qty, pos.current, reason);
     positions = positions.filter(p => p.symbol !== symbol);
   } catch (err) {
     console.log("Close failed:", err?.response?.data?.message || err.message);
   }
 }
 
-// ==================== EQUITY & POSITIONS ====================
+// ==================== ACCOUNT UPDATE ====================
 async function updateEquityAndPositions() {
   if (!ALPACA_KEY || !ALPACA_SECRET) return;
+
+  // Reset daily starting equity at market open
+  const now = new Date();
+  if (now.getHours() === 9 && now.getMinutes() < 5) {
+    startingEquityToday = accountEquity;
+  }
+
   try {
     const [accountRes, positionsRes] = await Promise.all([
-      axios.get(`${A_BASE}/account`, { headers: HEADERS, timeout: 12000 }),
-      axios.get(`${A_BASE}/positions`, { headers: HEADERS, timeout: 12000 })
+      axios.get(`${A_BASE}/account`, { headers: HEADERS }),
+      axios.get(`${A_BASE}/positions`, { headers: HEADERS })
     ]);
 
     accountEquity = parseFloat(accountRes.data.equity || 100000);
@@ -126,17 +134,14 @@ async function updateEquityAndPositions() {
       qty: Number(p.qty),
       entry: parseFloat(p.avg_entry_price),
       current: parseFloat(p.current_price),
-      market_value: parseFloat(p.market_value),
-      unrealized_pl: parseFloat(p.unrealized_pl),
-      unrealized_plpc: parseFloat(p.unrealized_plpc) * 100,
-      reason: ""
+      unrealized_pl: parseFloat(p.unrealized_pl)
     }));
   } catch (err) {
-    console.error("Alpaca fetch error:", err.message);
+    console.error("Alpaca error:", err.message);
   }
 }
 
-// ==================== MASSIVE.COM SCANNER ====================
+// ==================== MOMENTUM SCANNER (PROP-OPTIMIZED) ====================
 async function getMassiveGainers() {
   if (!MASSIVE_KEY) return [];
 
@@ -147,89 +152,71 @@ async function getMassiveGainers() {
     });
 
     return res.data.data
-      .filter(t => 
-        t.change_percent > 12 &&
-        t.volume > 2_000_000 &&
-        t.price > 10 &&
-        t.price < 500 &&
+      .filter(t =>
+        t.change_percent > 7.5 &&      // relaxed for daily trades
+        t.volume > 800_000 &&
+        t.price > 8 &&
+        t.price < 350 &&
         !positions.find(p => p.symbol === t.symbol)
       )
-      .slice(0, 5)
-      .map(t => ({
-        symbol: t.symbol,
-        price: t.price,
-        change: t.change_percent
-      }));
+      .slice(0, 4)
+      .map(t => ({ symbol: t.symbol, price: t.price }));
   } catch (err) {
     console.log("Massive API error:", err.response?.data || err.message);
     return [];
   }
 }
 
-// ==================== REAL EXIT LOGIC (TAKE PROFIT + STOP LOSS) ====================
+// ==================== PROFESSIONAL EXIT RULES ====================
 async function checkExits() {
   if (positions.length === 0) return;
 
-  for (const pos of positions) {
-    if (!pos.entry || !pos.current) continue;
-
-    const gainPct = ((pos.current - pos.entry) / pos.entry) * 100;
-
-    // Take Profit: +18%
-    if (gainPct >= 18) {
-      pos.reason = "Take Profit +18%";
-      await closePosition(pos.symbol);
-      continue;
-    }
-
-    // Stop Loss: -9%
-    if (gainPct <= -9) {
-      pos.reason = "Stop Loss -9%";
-      await closePosition(pos.symbol);
-      continue;
-    }
-
-    // Trailing Stop: if up +12%, trail with 6% stop
-    if (gainPct >= 12) {
-      const trailStop = pos.current * 0.94; // 6% trail
-      if (pos.current <= trailStop && !pos.trailSet) {
-        pos.reason = "Trailing Stop Hit";
-        await closePosition(pos.symbol);
-      }
-    }
-  }
-}
-
-// ==================== EOD FORCE CLOSE (RELIABLE) ====================
-function isMarketCloseTime() {
-  const now = new Date();
-  const utcHour = now.getUTCHours();
-  const utcMin = now.getUTCMinutes();
-  const etHour = utcHour - 4; // EST (adjust -5 during EDT, but safe trigger)
-
-  return etHour >= 15 && (etHour > 15 || utcMin >= 59); // After 3:59 PM ET
-}
-
-// ==================== MAIN TRADING LOOP ====================
-async function tradingLoop() {
-  await updateEquityAndPositions();
-
-  // 1. EOD Force Close
-  if (isMarketCloseTime()) {
-    console.log("🛑 MARKET CLOSED — FLATTENING EVERYTHING");
-    for (const pos of positions) await closePosition(pos.symbol);
+  const dailyPnL = accountEquity - startingEquityToday;
+  // DAILY LOSS LIMIT – critical for prop firms
+  if (dailyPnL <= -0.045 * startingEquityToday) {
+    console.log("DAILY DRAWDOWN LIMIT HIT (-4.5%) — FLATTENING ALL");
+    for (const pos of positions) await closePosition(pos.symbol, "Daily Loss Limit");
     return;
   }
 
-  // 2. Check Take Profit / Stop Loss / Trailing
+  for (const pos of positions) {
+    if (!pos.entry || !pos.current) continue;
+    const gainPct = (pos.current - pos.entry) / pos.entry * 100;
+
+    if (gainPct >= 18) {
+      await closePosition(pos.symbol, "Take Profit +18%");
+    } else if (gainPct <= -9) {
+      await closePosition(pos.symbol, "Stop Loss -9%");
+    }
+  }
+}
+
+// ==================== EOD FORCE CLOSE ====================
+function isAfterMarketClose() {
+  const now = new Date();
+  const etHour = now.getUTCHours() - 4;  // EST
+  return etHour >= 16 || (etHour === 15 && now.getUTCMinutes() >= 59);
+}
+
+// ==================== MAIN LOOP ====================
+async function tradingLoop() {
+  await updateEquityAndPositions();
+
+  if (isAfterMarketClose()) {
+    if (positions.length > 0) {
+      console.log("MARKET CLOSED — CLOSING ALL POSITIONS");
+      for (const pos of positions) await closePosition(pos.symbol, "EOD Flatten");
+    }
+    return;
+  }
+
   await checkExits();
 
-  // 3. Enter new positions (only if under max)
-  if (positions.length >= 5) return;
+  if (positions.length >= 4) return;
 
   const signals = await getMassiveGainers();
   for (const s of signals) {
-    if (positions.length >= 5) break;
+    if (positions.length >= 4) break;
     const qty = Math.max(1, Math.floor(accountEquity * 0.02 / s.price));
     await placeOrder(s.symbol, qty);
   }
@@ -238,42 +225,35 @@ async function tradingLoop() {
 // ==================== DASHBOARD ====================
 app.get("/", async (req, res) => {
   await updateEquityAndPositions();
-  const totalPnL = positions.reduce((sum, p) => sum + p.unrealized_pl, 0);
+  const unreal = positions.reduce((sum, p) => sum + p.unrealized_pl, 0);
   const winRate = backtestResults.trades > 0
     ? ((backtestResults.wins / backtestResults.trades) * 100).toFixed(1)
     : "0.0";
 
   res.json({
-    bot: "AlphaStream v36.2 — Massive.com + Real Exits",
-    version: "v36.2",
+    bot: "AlphaStream v37.0 — Prop Challenge Crusher",
+    version: "v37.0",
     status: "ONLINE",
-    mode: DRY ? "DRY" : "LIVE",
-    positions_count: positions.length,
-    max_pos: 5,
-    equity: `$${accountEquity.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
-    dailyPnL: totalPnL >= 0 ? `+$${totalPnL.toFixed(2)}` : `-$${Math.abs(totalPnL).toFixed(2)}`,
-    positions,
-    tradeLog: tradeLog.slice(-30),
-    backtest: {
-      totalTrades: backtestResults.trades,
-      winRate: `${winRate}%`,
-      totalPnL: backtestResults.totalPnL.toFixed(2),
-      wins: backtestResults.wins,
-      losses: backtestResults.losses
-    },
+    mode: DRY ? "PAPER" : "LIVE",
+    equity: `$${accountEquity.toFixed(2)}`,
+    dailyPnL: unreal >= 0 ? `+$${unreal.toFixed(2)}` : `-$${Math.abs(unreal).toFixed(2)}`,
+    positions: positions.length,
+    max_positions: 4,
+    total_trades: backtestResults.trades,
+    win_rate: `${winRate}%`,
+    tradeLog: tradeLog.slice(-50),
     timestamp: new Date().toISOString()
   });
 });
 
 app.get("/healthz", (req, res) => res.send("OK"));
 app.post("/manual/scan", async (req, res) => {
-  await tradingLoop();
-  res.json({ ok: true });
+  await tradingLoop(); res.json({ ok: true });
 });
 
 const PORT_NUM = parseInt(PORT, 10);
 app.listen(PORT_NUM, "0.0.0.0", () => {
-  console.log(`\nALPHASTREAM v36.2 LIVE ON PORT ${PORT_NUM}`);
+  console.log(`\nALPHASTREAM v37.0 READY — PORT ${PORT_NUM}`);
   console.log(`Dashboard → https://alphastream-dashboard.vercel.app\n`);
   setInterval(tradingLoop, 60000);
   tradingLoop();
