@@ -1,22 +1,39 @@
 name: Deploy AlphaStream Autopilot
+
 on:
   push:
     branches: [ main ]
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      id-token: write   # ← REQUIRED for workload identity (recommended 2025 way)
+
     steps:
       - uses: actions/checkout@v4
-      - name: Authenticate to Google Cloud
+
+      # ─────────────────────────────── AUTH (choose ONE of these two) ───────────────────────────────
+      # Option A: Workload Identity Federation (recommended – no service account key needed)
+      - name: Authenticate to Google Cloud (Workload Identity)
         uses: google-github-actions/auth@v2
         with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          workload_identity_provider: 'projects/123456789/locations/global/workloadIdentityPools/my-pool/providers/github'
+          service_account: 'alphastream-deployer@alphastream-2025.iam.gserviceaccount.com'
+
+      # Option B: Classic service account key (you already have this working)
+      # - name: Authenticate to Google Cloud
+      #   uses: google-github-actions/auth@v2
+      #   with:
+      #     credentials_json: ${{ secrets.GCP_SA_KEY }}
+
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
         with:
           project_id: alphastream-2025
+
+      # ─────────────────────────────── DEPLOY (THIS IS THE FIX) ───────────────────────────────
       - name: Deploy to Cloud Run
         run: |
           gcloud run deploy alphastream-autopilot \
@@ -25,14 +42,25 @@ jobs:
             --project=alphastream-2025 \
             --allow-unauthenticated \
             --quiet \
+            --port=8080 \
             --timeout=300 \
             --memory=1Gi \
-            --set-env-vars=ALPACA_KEY=${{ secrets.ALPACA_KEY }} \
-            --set-env-vars=ALPACA_SECRET=${{ secrets.ALPACA_SECRET }} \
-            --set-env-vars=MASSIVE_KEY=${{ secrets.MASSIVE_KEY }} \
-            --set-env-vars=LOG_SHEET_ID=${{ secrets.LOG_SHEET_ID }} \
-            --set-env-vars=WEBHOOK_URL=${{ secrets.WEBHOOK_URL }} \
-            --set-env-vars=WEBHOOK_SECRET=${{ secrets.WEBHOOK_SECRET }} \
-            --set-env-vars=PREDICTOR_URL=${{ secrets.PREDICTOR_URL }} \
-            --set-env-vars=FORWARD_SECRET=${{ secrets.FORWARD_SECRET }} \
+            --update-secrets=/secrets/ALPACA_KEY=ALPACA_KEY:latest \
+            --update-secrets=/secrets/ALPACA_SECRET=ALPACA_SECRET:latest \
+            --update-secrets=/secrets/FMP_KEY=FMP_KEY:latest \
             --set-env-vars=DRY_MODE=false
+
+      # ─────────────────────────────── CREATE SECRETS (run once only) ───────────────────────────────
+      # Uncomment and run this block ONCE to create the secrets in Secret Manager
+      # - name: Create/Update Secrets (run once)
+      #   run: |
+      #     echo "${{ secrets.ALPACA_KEY }}"      | gcloud secrets create ALPACA_KEY      --data-file=- || gcloud secrets versions add ALPACA_KEY      --data-file=-
+      #     echo "${{ secrets.ALPACA_SECRET }}"  | gcloud secrets create ALPACA_SECRET  --data-file=- || gcloud secrets versions add ALPACA_SECRET  --data-file=-
+      #     echo "${{ secrets.FMP_KEY }}"        | gcloud secrets create FMP_KEY        --data-file=- || gcloud secrets versions add FMP_KEY        --data-file=-
+
+      # ─────────────────────────────── Grant Cloud Run permission to read secrets (run once) ───────────────────────────────
+      # - name: Grant Secret Access to Cloud Run SA (run once)
+      #   run: |
+      #     gcloud secrets add-iam-policy-binding ALPACA_KEY      --member="serviceAccount:alphastream-2025@cloudservices.gserviceaccount.com" --role=roles/secretmanager.secretAccessor
+      #     gcloud secrets add-iam-policy-binding ALPACA_SECRET  --member="serviceAccount:alphastream-2025@cloudservices.gserviceaccount.com" --role=roles/secretmanager.secretAccessor
+      #     gcloud secrets add-iam-policy-binding FMP_KEY        --member="serviceAccount:alphastream-2025@cloudservices.gserviceaccount.com" --role=roles/secretmanager.secretAccessor
