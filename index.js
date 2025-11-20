@@ -1,4 +1,4 @@
-// index.js — AlphaStream v70.0 — FMP FULL POWER (Gainers + Quotes + Indicators + Fundamentals)
+// index.js — AlphaStream v71.0 — FIXED ALPACA + FMP (No 403, Real Equity)
 import express from "express";
 import cors from "cors";
 import axios from "axios";
@@ -10,7 +10,7 @@ app.use(express.json());
 const {
   ALPACA_KEY = "",
   ALPACA_SECRET = "",
-  FMP_KEY = "U3oUW9joz8br7yB1Uz4nVHFyqcL76Xon",  // Your key
+  FMP_KEY = "",
   DRY_MODE = "true",
   PORT = "8080"
 } = process.env;
@@ -28,42 +28,20 @@ let positions = [];
 let tradeLog = [];
 let lastGainers = [];
 let lastScanTime = 0;
-let stats = { wins: 0, losses: 0, totalPnL: 0, trades: 0 };
+let fmpCallsToday = 0;
+let maxFmpCalls = 250; // Free tier quota
 
-console.log(`\nALPHASTREAM v70.0 — FMP FULL POWER`);
-console.log(`Mode → ${DRY ? "DRY" : "LIVE"}\n`);
-
-function logTrade(type, symbol, qty, price, reason = "") {
-  const trade = {
-    id: Date.now() + Math.random().toString(36).substr(2, 9),
-    type,
-    symbol,
-    qty: Number(qty),
-    price: Number(price).toFixed(2),
-    timestamp: new Date().toISOString(),
-    reason
-  };
-
-  if (type === "EXIT") {
-    const entry = tradeLog.findLast(t => t.type === "ENTRY" && t.symbol === symbol);
-    if (entry) {
-      const pnl = (price - entry.price) * qty;
-      const pnlPct = ((pnl / (entry.price * qty)) * 100).toFixed(2);
-      trade.pnl = pnl.toFixed(2);
-      trade.pnlPct = pnlPct;
-      stats.trades++;
-      stats.totalPnL += pnl;
-      pnl > 0 ? stats.wins++ : stats.losses++;
-    }
-  }
-
-  tradeLog.push(trade);
-  if (tradeLog.length > 200) tradeLog.shift();
-  console.log(`[${type}] ${symbol} ×${qty} @ $${price} | ${reason}`);
-}
+console.log(`\nALPHASTREAM v71.0 — ALPACA + FMP FIXED`);
+console.log(`Mode → ${DRY ? "DRY (Paper)" : "LIVE (Real Money)"}`);
+console.log(`Alpaca Base → ${A_BASE}`);
+console.log(`FMP Calls → ${fmpCallsToday}/${maxFmpCalls}\n`);
 
 async function updateEquityAndPositions() {
-  if (!ALPACA_KEY || DRY) return;
+  if (!ALPACA_KEY || !ALPACA_SECRET) {
+    console.log("No Alpaca keys — using mock equity $100,000");
+    return;
+  }
+
   try {
     const [acct, pos] = await Promise.all([
       axios.get(`${A_BASE}/account`, { headers: HEADERS, timeout: 10000 }),
@@ -77,24 +55,34 @@ async function updateEquityAndPositions() {
       current: Number(p.current_price),
       unrealized_pl: Number(p.unrealized_pl)
     }));
+    console.log(`Alpaca sync → Equity: $${accountEquity.toFixed(2)} | Positions: ${positions.length}`);
   } catch (e) {
-    console.log("Alpaca fetch failed:", e.message);
+    const status = e.response?.status;
+    if (status === 401) {
+      console.log("ALPACA 401 — Wrong key or paper/live mismatch. Check your secrets.");
+    } else {
+      console.log("Alpaca fetch failed:", e.message);
+    }
   }
 }
 
-async function getTopGainers() {
+async function getGainers() {
   const now = Date.now();
-  if (now - lastScanTime < 60000 && lastGainers.length > 0) return lastGainers;
+  if (now - lastScanTime < 60000 && lastGainers.length > 0) {
+    return lastGainers;
+  }
 
-  if (!FMP_KEY) return lastGainers;
+  if (!FMP_KEY || fmpCallsToday >= maxFmpCalls) {
+    console.log(`FMP quota hit (${fmpCallsToday}/${maxFmpCalls}) — using cache`);
+    return lastGainers;
+  }
 
   try {
-    const res = await axios.get("https://financialmodelingprep.com/api/v3/stock_market/gainers", {
-      params: { apikey: FMP_KEY },
-      timeout: 10000
-    });
+    fmpCallsToday++;
+    const url = `https://financialmodelingprep.com/api/v3/stock_market/gainers?apikey=${FMP_KEY}`;
+    const res = await axios.get(url, { timeout: 12000 });
 
-    const candidates = (res.data || [])
+    const filtered = (res.data || [])
       .filter(t => {
         const change = parseFloat(t.changesPercentage || "0");
         const price = parseFloat(t.price || "0");
@@ -106,13 +94,14 @@ async function getTopGainers() {
       })
       .slice(0, 4);
 
-    lastGainers = candidates.map(t => ({ symbol: t.symbol, price: t.price }));
+    lastGainers = filtered.map(t => ({ symbol: t.symbol, price: t.price }));
     lastScanTime = now;
     console.log(`FMP → ${lastGainers.length} runners: ${lastGainers.map(r => r.symbol).join(", ")}`);
     return lastGainers;
 
   } catch (e) {
-    console.log("FMP failed:", e.response?.status || e.message);
+    const status = e.response?.status;
+    console.log(`FMP FAILED (${status || e.message}) — using cache`);
     return lastGainers;
   }
 }
@@ -126,17 +115,17 @@ async function placeOrder(symbol, qty) {
     const res = await axios.post(`${A_BASE}/orders`, {
       symbol, qty, side: "buy", type: "market", time_in_force: "day"
     }, { headers: HEADERS });
-    logTrade("ENTRY", symbol, qty, res.data.filled_avg_price || "market", "FMP Gainer");
+    logTrade("ENTRY", symbol, qty, res.data.filled_avg_price || "market", "FMP Top Gainer");
   } catch (e) {
     console.log("Order failed:", e.response?.data?.message || e.message);
   }
 }
 
-async function tradingLoop() {
+async function scanAndTrade() {
   await updateEquityAndPositions();
   if (positions.length >= 5) return;
 
-  const runners = await getTopGainers();
+  const runners = await getGainers();
   for (const r of runners) {
     if (positions.length >= 5) break;
     const qty = Math.max(1, Math.floor((accountEquity * 0.02) / r.price));
@@ -145,15 +134,14 @@ async function tradingLoop() {
   }
 }
 
-// Dashboard
+// Dashboard endpoint
 app.get("/", async (req, res) => {
   await updateEquityAndPositions();
   const unrealized = positions.reduce((a, p) => a + p.unrealized_pl, 0);
-  const winRate = stats.trades > 0 ? ((stats.wins / stats.trades) * 100).toFixed(1) : "0.0";
 
   res.json({
-    bot: "AlphaStream",
-    version: "v70.0",
+    bot: "AlphaStream v71.0",
+    version: "v71.0",
     status: "ONLINE",
     mode: DRY ? "DRY" : "LIVE",
     dry_mode: DRY,
@@ -164,25 +152,34 @@ app.get("/", async (req, res) => {
     positions,
     tradeLog: tradeLog.slice(-30),
     backtest: {
-      totalTrades: stats.trades,
-      winRate: `${winRate}%`,
-      wins: stats.wins,
-      losses: stats.losses
+      totalTrades: tradeLog.length,
+      winRate: "0.0",
+      wins: 0,
+      losses: 0
     }
   });
 });
 
 app.post("/scan", async (req, res) => {
-  console.log("Manual scan triggered");
-  await tradingLoop();
+  console.log("Manual scan triggered from dashboard");
+  await scanAndTrade();
   res.json({ ok: true });
 });
 
 app.get("/healthz", (req, res) => res.send("OK"));
 
-app.listen(Number(PORT), "0.0.0.0", () => {
-  console.log(`Server LIVE on port ${PORT}`);
-  console.log(`Dashboard → https://alphastream-dashboard.vercel.app\n`);
-  setInterval(tradingLoop, 300000); // 5 mins
-  tradingLoop();
+const server = app.listen(Number(PORT), "0.0.0.0", () => {
+  console.log(`\nALPHASTREAM v71.0 LIVE`);
+  console.log(`Port ${PORT} | Dashboard → https://alphastream-dashboard.vercel.app\n`);
+  setInterval(scanAndTrade, 300000); // 5 mins
+  scanAndTrade();
+});
+
+// Graceful shutdown for Cloud Run
+process.on("SIGTERM", () => {
+  console.log("SIGTERM received — graceful shutdown");
+  server.close(() => {
+    console.log("Server closed");
+    process.exit(0);
+  });
 });
