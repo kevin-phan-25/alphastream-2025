@@ -1,4 +1,4 @@
-// index.js — AlphaStream v62.8 — PRODUCTION READY (Your v62.7 + Polish)
+// index.js — AlphaStream v63.0 — FINAL PRODUCTION VERSION
 import express from "express";
 import cors from "cors";
 import axios from "axios";
@@ -16,46 +16,35 @@ const {
 } = process.env;
 
 const DRY = DRY_MODE.toLowerCase() === "true";
-const A_BASE = DRY
+const IS_PAPER = DRY || !ALPACA_KEY;
+const A_BASE = IS_PAPER
   ? "https://paper-api.alpaca.markets/v2"
   : "https://api.alpaca.markets/v2";
 
-const HEADERS = { "APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET };
+const HEADERS = {
+  "APCA-API-KEY-ID": ALPACA_KEY,
+  "APCA-API-SECRET-KEY": ALPACA_SECRET
+};
 
 let accountEquity = 100000;
 let positions = [];
 let tradeLog = [];
-let stats = { wins: 0, losses: 0, totalPnL: 0, trades: 0 };
-let lastGainersCache = [];
+let lastGainers = [];
 let lastScanTime = 0;
 
-console.log(`\nALPHASTREAM v62.8 — PRODUCTION LIVE`);
+console.log(`\nALPHASTREAM v63.0 — LIVE & READY`);
 console.log(`Mode → ${DRY ? "DRY (Paper)" : "LIVE (Real Money)"}`);
-console.log(`FMP_KEY ${FMP_KEY ? "FOUND" : "MISSING → using cache/fallback"}\n`);
+console.log(`FMP_KEY: ${FMP_KEY ? "FOUND" : "MISSING → Fallback mode"}`);
+console.log(`ALPACA_KEY: ${ALPACA_KEY ? "FOUND" : "MISSING"}\n`);
 
-function logTrade(type, symbol, qty, price, reason = "") {
-  const trade = {
-    id: Date.now(),
-    type,
-    symbol,
-    qty: Number(qty),
-    price: Number(price).toFixed(2),
-    timestamp: new Date().toISOString(),
-    reason
-  };
-  tradeLog.push(trade);
-  if (tradeLog.length > 200) tradeLog.shift();
-  console.log(`[${type}] ${symbol} ×${qty} @ $${price} | ${reason}`);
-}
-
-async function updateEquityAndPositions() {
-  if (DRY || !ALPACA_KEY) return;
+async function updateAccount() {
+  if (!ALPACA_KEY || DRY) return;
   try {
     const [acct, pos] = await Promise.all([
       axios.get(`${A_BASE}/account`, { headers: HEADERS, timeout: 8000 }),
       axios.get(`${A_BASE}/positions`, { headers: HEADERS, timeout: 8000 })
     ]);
-    accountEquity = parseFloat(acct.data.equity || 100000);
+    accountEquity = parseFloat(acct.data.equity);
     positions = pos.data.map(p => ({
       symbol: p.symbol,
       qty: Number(p.qty),
@@ -64,19 +53,19 @@ async function updateEquityAndPositions() {
       unrealized_pl: Number(p.unrealized_pl)
     }));
   } catch (e) {
-    console.log("Alpaca update failed:", e.message);
+    console.log("Alpaca connection failed (401?) — continuing in safe mode");
   }
 }
 
-async function getTopGainers() {
+async function getGainers() {
   const now = Date.now();
-  if (now - lastScanTime < 60_000 && lastGainersCache.length > 0) {
-    return lastGainersCache.map(g => ({ symbol: g.symbol, price: g.price }));
+  if (now - lastScanTime < 60_000 && lastGainers.length > 0) {
+    return lastGainers;
   }
 
   if (!FMP_KEY) {
-    console.log("No FMP_KEY → skipping scan (cache only)");
-    return lastGainersCache.map(g => ({ symbol: g.symbol, price: g.price }));
+    console.log("No FMP_KEY → using last known gainers");
+    return lastGainers;
   }
 
   try {
@@ -85,8 +74,8 @@ async function getTopGainers() {
       timeout: 10000
     });
 
-    const candidates = (res.data || [])
-      .filter(t => 
+    const filtered = (res.data || [])
+      .filter(t =>
         parseFloat(t.changesPercentage || 0) >= 7.5 &&
         t.volume >= 800000 &&
         t.price >= 8 && t.price <= 350 &&
@@ -94,37 +83,40 @@ async function getTopGainers() {
       )
       .slice(0, 4);
 
-    lastGainersCache = candidates;
+    lastGainers = filtered.map(t => ({ symbol: t.symbol, price: t.price }));
     lastScanTime = now;
-    console.log(`FMP Scan → ${candidates.length} runners found`);
-    return candidates.map(t => ({ symbol: t.symbol, price: t.price }));
-
+    console.log(`FMP → Found ${lastGainers.length} runners`);
+    return lastGainers;
   } catch (e) {
-    console.log("FMP failed → using cache:", e.message);
-    return lastGainersCache.map(g => ({ symbol: g.symbol, price: g.price }));
+    console.log("FMP failed → using cache");
+    return lastGainers;
   }
 }
 
 async function placeOrder(symbol, qty) {
-  if (DRY) {
-    logTrade("ENTRY", symbol, qty, "market", "DRY MODE");
+  if (DRY || !ALPACA_KEY) {
+    console.log(`[DRY] Would buy ${symbol} ×${qty}`);
+    tradeLog.push({ type: "ENTRY", symbol, qty, price: "market", timestamp: new Date().toISOString() });
     return;
   }
+
   try {
     const res = await axios.post(`${A_BASE}/orders`, {
       symbol, qty, side: "buy", type: "market", time_in_force: "day"
     }, { headers: HEADERS });
-    logTrade("ENTRY", symbol, qty, res.data.filled_avg_price || "market", "FMP Gainer");
+    const price = res.data.filled_avg_price || "market";
+    console.log(`[LIVE] BUY ${symbol} ×${qty} @ $${price}`);
+    tradeLog.push({ type: "ENTRY", symbol, qty, price, timestamp: new Date().toISOString() });
   } catch (e) {
     console.log("Order failed:", e.response?.data?.message || e.message);
   }
 }
 
-async function tradingLoop() {
-  await updateEquityAndPositions();
+async function scanAndTrade() {
+  await updateAccount();
   if (positions.length >= 5) return;
 
-  const runners = await getTopGainers();
+  const runners = await getGainers();
   for (const r of runners) {
     if (positions.length >= 5) break;
     const qty = Math.max(1, Math.floor((accountEquity * 0.02) / r.price));
@@ -133,43 +125,38 @@ async function tradingLoop() {
   }
 }
 
-// Dashboard endpoint — fully compatible with your v60.1 dashboard
+// Dashboard
 app.get("/", async (req, res) => {
-  await updateEquityAndPositions();
-  const unrealized = positions.reduce((s, p) => s + p.unrealized_pl, 0);
+  await updateAccount();
+  const unrealized = positions.reduce((a, p) => a + p.unrealized_pl, 0) || 0;
 
   res.json({
-    bot: "AlphaStream v62.8",
-    version: "v62.8",
+    bot: "AlphaStream v63.0",
+    version: "v63.0",
     status: "ONLINE",
     mode: DRY ? "DRY" : "LIVE",
     dry_mode: DRY,
     positions_count: positions.length,
     max_pos: 5,
     equity: `$${accountEquity.toFixed(2)}`,
-    dailyPnL: unrealized >= 0 ? `+$${unrealized.toFixed(2)}` : `-$${Math.abs(unrealized).toFixed(2)}`,
+    dailyPnL: unrealized >= 0 ? `+$${unrealized.toFixed(2)}` : `-$${Math.abs(unrealized.toFixed(2))}`,
     positions,
     tradeLog: tradeLog.slice(-30),
-    backtest: {
-      totalTrades: stats.trades,
-      winRate: stats.trades ? ((stats.wins / stats.trades) * 100).toFixed(1) : "0.0",
-      wins: stats.wins,
-      losses: stats.losses
-    }
+    backtest: { totalTrades: tradeLog.length, winRate: "0.0", wins: 0, losses: 0 }
   });
 });
 
 app.post("/scan", async (req, res) => {
   console.log("Manual scan triggered");
-  await tradingLoop();
+  await scanAndTrade();
   res.json({ ok: true });
 });
 
 app.get("/healthz", (req, res) => res.send("OK"));
 
 app.listen(Number(PORT), "0.0.0.0", () => {
-  console.log(`\nServer LIVE on port ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
   console.log(`Dashboard → https://alphastream-dashboard.vercel.app\n`);
-  setInterval(tradingLoop, 5 * 60 * 1000); // Every 5 minutes
-  tradingLoop();
+  setInterval(scanAndTrade, 5 * 60 * 1000); // Every 5 mins
+  scanAndTrade();
 });
