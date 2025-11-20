@@ -1,7 +1,8 @@
-// index.js — AlphaStream v52.0 — FREE TIER TOP GAINERS (No 403, Real Scanning)
+// index.js — AlphaStream v53.0 — YAHOO RSS TOP GAINERS (FREE, NO 403) + MASSIVE VALIDATION
 import express from "express";
 import cors from "cors";
 import axios from "axios";
+import * as cheerio from "cheerio"; // npm install cheerio
 
 const app = express();
 app.use(cors());
@@ -10,7 +11,7 @@ app.use(express.json());
 const {
   ALPACA_KEY = "",
   ALPACA_SECRET = "",
-  MASSIVE_KEY = "",           // ← Your Massive.com Bearer token (free tier OK)
+  MASSIVE_KEY = "",           // ← For price validation (free tier OK)
   DRY_MODE = "true",
   PORT = "8080"
 } = process.env;
@@ -26,17 +27,12 @@ const HEADERS = {
   "APCA-API-SECRET-KEY": ALPACA_SECRET
 };
 
-const MASSIVE_HEADERS = {
-  "Authorization": `Bearer ${MASSIVE_KEY}`,
-  "Accept": "application/json"
-};
-
 let accountEquity = 100000;
 let positions = [];
 let tradeLog = [];
 let stats = { wins: 0, losses: 0, totalPnL: 0, trades: 0 };
 
-console.log(`\nALPHASTREAM v52.0 — FREE TIER GAINERS`);
+console.log(`\nALPHASTREAM v53.0 — YAHOO RSS GAINERS (FREE, NO 403)`);
 console.log(`Mode → ${DRY ? "DRY" : "LIVE"}\n`);
 
 // ==================== LOGGING ====================
@@ -80,7 +76,7 @@ async function placeOrder(symbol, qty) {
     const res = await axios.post(`${A_BASE}/orders`, {
       symbol, qty, side: "buy", type: "market", time_in_force: "day"
     }, { headers: HEADERS, timeout: 10000 });
-    logTrade("ENTRY", symbol, qty, res.data.filled_avg_price || "market", "Top Gainer Signal");
+    logTrade("ENTRY", symbol, qty, res.data.filled_avg_price || "market", "Yahoo Gainer Signal");
   } catch (err) {
     console.log("Order failed:", err?.response?.data?.message || err.message);
   }
@@ -107,65 +103,48 @@ async function updateEquityAndPositions() {
   }
 }
 
-// ==================== FREE TIER TOP GAINERS (Massive + Fallback) ====================
+// ==================== FREE TIER TOP GAINERS (Yahoo RSS + Massive Validation) ====================
 async function getTopGainers() {
-  if (!MASSIVE_KEY) return [];
-
   try {
-    // Primary: Massive.com Top Movers (free tier OK for basic)
-    const res = await axios.get("https://api.massive.com/v2/snapshot/locale/us/markets/stocks/gainers", {
-      headers: MASSIVE_HEADERS,
-      timeout: 10000
-    });
+    // Parse Yahoo RSS for top gainers headlines (free, no key)
+    const rssRes = await axios.get("https://feeds.finance.yahoo.com/rss/2.0/headline?s=yhoo&region=US&lang=en-US", { timeout: 8000 });
+    const $ = cheerio.load(rssRes.data);
+    const items = $("item").slice(0, 50).toArray();
 
-    const tickers = res.data?.tickers || [];
-    console.log(`Massive Top Movers: ${tickers.length} gainers`);
+    const candidates = [];
+    for (const item of items) {
+      const title = $(item).find('title').text();
+      const match = title.match(/([A-Z]{1,5})[A-Z]?.*\+(\d+\.?\d*)%/); // e.g. "NVDA +8.5%"
+      if (!match) continue;
 
-    return tickers
-      .filter(t => 
-        t.todaysChangePerc >= 7.5 &&
-        t.volume >= 800000 &&
-        t.price >= 8 &&
-        t.price <= 350 &&
-        !positions.some(p => p.symbol === t.symbol)
-      )
-      .slice(0, 4)
-      .map(t => ({
-        symbol: t.symbol,
-        price: t.price
-      }));
+      const symbol = match[1];
+      const change = parseFloat(match[2]);
+
+      if (change < 7.5) continue;
+
+      // Validate price/volume with Massive.com (free tier OK)
+      try {
+        const priceRes = await axios.get(`https://api.massive.com/v2/last/trade/${symbol}`, {
+          headers: { Authorization: `Bearer ${MASSIVE_KEY}` },
+          timeout: 5000
+        });
+        const price = priceRes.data?.results?.P || 0;
+        const volume = priceRes.data?.results?.s || 0;
+
+        if (price >= 8 && price <= 350 && volume >= 800000) {
+          candidates.push({ symbol, price, change });
+        }
+      } catch {
+        // Skip validation if Massive fails — RSS is primary
+      }
+    }
+
+    console.log(`Yahoo RSS + Massive: ${candidates.length} candidates`);
+    return candidates.slice(0, 4);
 
   } catch (err) {
-    console.log("Massive Top Movers failed:", err.response?.status);
-    // Fallback: Basic tickers + previous day for % change (free tier OK)
-    try {
-      const tickersRes = await axios.get("https://api.massive.com/v1/reference/tickers", {
-        params: { active: true, limit: 100 },
-        headers: MASSIVE_HEADERS,
-        timeout: 8000
-      });
-
-      const tickers = tickersRes.data.results || [];
-      const candidates = [];
-
-      for (const t of tickers.slice(0, 50)) {
-        try {
-          const prevDay = await axios.get(`https://api.massive.com/v2/aggs/ticker/${t.ticker}/prev`, {
-            headers: MASSIVE_HEADERS,
-            timeout: 5000
-          });
-          const change = ((prevDay.data.results?.c - prevDay.data.results?.o) / prevDay.data.results?.o * 100) || 0;
-          if (change >= 7.5) candidates.push({ symbol: t.ticker, price: prevDay.data.results?.c });
-        } catch {}
-      }
-
-      console.log(`Fallback gainers: ${candidates.length}`);
-      return candidates.slice(0, 4);
-
-    } catch (fallbackErr) {
-      console.log("Full fallback failed");
-      return [];
-    }
+    console.log("Gainers scan error:", err.message);
+    return [];
   }
 }
 
@@ -179,7 +158,7 @@ async function tradingLoop() {
     if (positions.length >= 5) break;
     const qty = Math.max(1, Math.floor((accountEquity * 0.02) / c.price));
     await placeOrder(c.symbol, qty);
-    await new Promise(r => setTimeout(r, 3000)); // Rate limit
+    await new Promise(r => setTimeout(r, 3000));
   }
 }
 
@@ -190,8 +169,8 @@ app.get("/", async (req, res) => {
   const winRate = stats.trades > 0 ? ((stats.wins / stats.trades) * 100).toFixed(1) : "0.0";
 
   res.json({
-    bot: "AlphaStream v52.0",
-    version: "v52.0",
+    bot: "AlphaStream v53.0",
+    version: "v53.0",
     status: "ONLINE",
     mode: DRY ? "DRY" : "LIVE",
     dry_mode: DRY,
@@ -210,7 +189,7 @@ app.get("/", async (req, res) => {
   });
 });
 
-app.post("/scan", async (req, res) => {
+app.post("/manual/scan", async (req, res) => {
   console.log("Manual scan triggered");
   await tradingLoop();
   res.json({ ok: true });
@@ -219,7 +198,7 @@ app.post("/scan", async (req, res) => {
 app.get("/healthz", (req, res) => res.send("OK"));
 
 app.listen(Number(PORT), "0.0.0.0", () => {
-  console.log(`\nALPHASTREAM v52.0 LIVE — FREE GAINERS ACTIVE`);
+  console.log(`\nALPHASTREAM v53.0 LIVE — FREE RSS GAINERS`);
   console.log(`Dashboard: https://alphastream-dashboard.vercel.app\n`);
   setInterval(tradingLoop, 60000);
   tradingLoop();
