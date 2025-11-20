@@ -1,4 +1,4 @@
-// index.js — AlphaStream v63.0 — FINAL PRODUCTION VERSION
+// index.js — AlphaStream v64.0 — FINAL PRODUCTION (Paper + Live Ready)
 import express from "express";
 import cors from "cors";
 import axios from "axios";
@@ -16,9 +16,8 @@ const {
 } = process.env;
 
 const DRY = DRY_MODE.toLowerCase() === "true";
-const IS_PAPER = DRY || !ALPACA_KEY;
-const A_BASE = IS_PAPER
-  ? "https://paper-api.alpaca.markets/v2"
+const A_BASE = DRY 
+  ? "https://paper-api.alpaca.markets/v2" 
   : "https://api.alpaca.markets/v2";
 
 const HEADERS = {
@@ -32,19 +31,19 @@ let tradeLog = [];
 let lastGainers = [];
 let lastScanTime = 0;
 
-console.log(`\nALPHASTREAM v63.0 — LIVE & READY`);
-console.log(`Mode → ${DRY ? "DRY (Paper)" : "LIVE (Real Money)"}`);
-console.log(`FMP_KEY: ${FMP_KEY ? "FOUND" : "MISSING → Fallback mode"}`);
-console.log(`ALPACA_KEY: ${ALPACA_KEY ? "FOUND" : "MISSING"}\n`);
+console.log(`\nALPHASTREAM v64.0 — FULLY OPERATIONAL`);
+console.log(`Mode → ${DRY ? "DRY (Paper Trading)" : "LIVE (Real Money)"}`);
+console.log(`FMP_KEY → ${FMP_KEY ? "FOUND" : "MISSING"}`);
+console.log(`ALPACA_KEY → ${ALPACA_KEY ? "FOUND" : "MISSING"}\n`);
 
 async function updateAccount() {
-  if (!ALPACA_KEY || DRY) return;
+  if (!ALPACA_KEY) return;
   try {
     const [acct, pos] = await Promise.all([
-      axios.get(`${A_BASE}/account`, { headers: HEADERS, timeout: 8000 }),
-      axios.get(`${A_BASE}/positions`, { headers: HEADERS, timeout: 8000 })
+      axios.get(`${A_BASE}/account`, { headers: HEADERS, timeout: 10000 }),
+      axios.get(`${A_BASE}/positions`, { headers: HEADERS, timeout: 10000 })
     ]);
-    accountEquity = parseFloat(acct.data.equity);
+    accountEquity = parseFloat(acct.data.equity || 100000);
     positions = pos.data.map(p => ({
       symbol: p.symbol,
       qty: Number(p.qty),
@@ -53,7 +52,7 @@ async function updateAccount() {
       unrealized_pl: Number(p.unrealized_pl)
     }));
   } catch (e) {
-    console.log("Alpaca connection failed (401?) — continuing in safe mode");
+    console.log("Alpaca fetch failed — continuing with last known state");
   }
 }
 
@@ -64,38 +63,41 @@ async function getGainers() {
   }
 
   if (!FMP_KEY) {
-    console.log("No FMP_KEY → using last known gainers");
+    console.log("No FMP_KEY — using cache");
     return lastGainers;
   }
 
   try {
-    const res = await axios.get("https://financialmodelingprep.com/api/v3/stock_market/gainers", {
-      params: { apikey: FMP_KEY },
-      timeout: 10000
-    });
+    const url = `https://financialmodelingprep.com/api/v3/stock_market/gainers?apikey=${FMP_KEY}`;
+    const res = await axios.get(url, { timeout: 12000 });
 
     const filtered = (res.data || [])
-      .filter(t =>
-        parseFloat(t.changesPercentage || 0) >= 7.5 &&
-        t.volume >= 800000 &&
-        t.price >= 8 && t.price <= 350 &&
-        !positions.some(p => p.symbol === t.symbol)
-      )
+      .filter(t => {
+        const change = parseFloat(t.changesPercentage || "0");
+        const price = parseFloat(t.price || "0");
+        const volume = parseInt(t.volume || "0", 10);
+        return change >= 7.5 &&
+               volume >= 800000 &&
+               price >= 8 && price <= 350 &&
+               !positions.some(p => p.symbol === t.symbol);
+      })
       .slice(0, 4);
 
     lastGainers = filtered.map(t => ({ symbol: t.symbol, price: t.price }));
     lastScanTime = now;
-    console.log(`FMP → Found ${lastGainers.length} runners`);
+    console.log(`FMP SUCCESS → ${lastGainers.length} runners: ${lastGainers.map(r => r.symbol).join(", ")}`);
     return lastGainers;
+
   } catch (e) {
-    console.log("FMP failed → using cache");
+    const status = e.response?.status;
+    console.log(`FMP FAILED (${status || e.message}) — using cache`);
     return lastGainers;
   }
 }
 
 async function placeOrder(symbol, qty) {
   if (DRY || !ALPACA_KEY) {
-    console.log(`[DRY] Would buy ${symbol} ×${qty}`);
+    console.log(`[DRY] Would buy ${symbol} ×${qty} @ market`);
     tradeLog.push({ type: "ENTRY", symbol, qty, price: "market", timestamp: new Date().toISOString() });
     return;
   }
@@ -125,14 +127,14 @@ async function scanAndTrade() {
   }
 }
 
-// Dashboard
+// MAIN DASHBOARD ENDPOINT — 100% COMPATIBLE WITH v60.1 DASHBOARD
 app.get("/", async (req, res) => {
   await updateAccount();
-  const unrealized = positions.reduce((a, p) => a + p.unrealized_pl, 0) || 0;
+  const unrealized = positions.reduce((a, p) => a + p.unrealized_pl, 0);
 
   res.json({
-    bot: "AlphaStream v63.0",
-    version: "v63.0",
+    bot: "AlphaStream",
+    version: "v64.0",
     status: "ONLINE",
     mode: DRY ? "DRY" : "LIVE",
     dry_mode: DRY,
@@ -142,7 +144,12 @@ app.get("/", async (req, res) => {
     dailyPnL: unrealized >= 0 ? `+$${unrealized.toFixed(2)}` : `-$${Math.abs(unrealized.toFixed(2))}`,
     positions,
     tradeLog: tradeLog.slice(-30),
-    backtest: { totalTrades: tradeLog.length, winRate: "0.0", wins: 0, losses: 0 }
+    backtest: {
+      totalTrades: tradeLog.length,
+      winRate: "0.0",
+      wins: 0,
+      losses: 0
+    }
   });
 });
 
@@ -155,8 +162,8 @@ app.post("/scan", async (req, res) => {
 app.get("/healthz", (req, res) => res.send("OK"));
 
 app.listen(Number(PORT), "0.0.0.0", () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`Server LIVE on port ${PORT}`);
   console.log(`Dashboard → https://alphastream-dashboard.vercel.app\n`);
-  setInterval(scanAndTrade, 5 * 60 * 1000); // Every 5 mins
+  setInterval(scanAndTrade, 5 * 60 * 1000);
   scanAndTrade();
 });
