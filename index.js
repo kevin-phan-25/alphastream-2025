@@ -1,14 +1,15 @@
-// index.js — AlphaStream v81.4 — Prop-Firm Ready
+// index.js — AlphaStream v82.0 — PROP-FIRM READY
 import express from "express";
 import cors from "cors";
 import axios from "axios";
 import * as cheerio from "cheerio";
+import fs from "fs";
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ENV Variables
+// ----------------- ENV -----------------
 const {
   ALPACA_KEY = "",
   ALPACA_SECRET = "",
@@ -29,7 +30,7 @@ const HEADERS = {
   "APCA-API-SECRET-KEY": ALPACA_SECRET 
 };
 
-// Core data
+// ----------------- CORE DATA -----------------
 let accountEquity = 100000;
 let positions = [];
 let tradeLog = [];
@@ -38,10 +39,7 @@ let lastScanTime = 0;
 let dailyPnL = 0;
 let dailyMaxLossHit = false;
 
-console.log(`\nALPHASTREAM v81.4 — PROP-FIRM READY`);
-console.log(`Mode → ${DRY ? "DRY (real PnL)" : "LIVE"}\n`);
-
-// ---------- LOGGING FUNCTION ----------
+// ----------------- LOGGING -----------------
 function logTrade(type, symbol, qty, price, reason = "", pnl = 0) {
   const trade = {
     type,
@@ -50,21 +48,27 @@ function logTrade(type, symbol, qty, price, reason = "", pnl = 0) {
     price: Number(price).toFixed(2),
     timestamp: new Date().toISOString(),
     reason,
-    pnl: pnl.toFixed(2)
+    pnl: pnl.toFixed(2),
+    equity: accountEquity.toFixed(2)
   };
   tradeLog.push(trade);
-  if (tradeLog.length > 500) tradeLog.shift();
+  if (tradeLog.length > 1000) tradeLog.shift(); // limit log size
+
+  // Update daily PnL
   dailyPnL += pnl;
   console.log(`[${DRY ? "DRY" : "LIVE"}] ${type} ${symbol} ×${qty} @ $${price} | ${reason} | PnL ${pnl.toFixed(2)} | DailyPnL $${dailyPnL.toFixed(2)}`);
 
+  // Save log for prop firm review
+  fs.writeFileSync("tradeLog.json", JSON.stringify(tradeLog, null, 2));
+
   // Check daily max loss
-  if (dailyPnL <= -MAX_LOSS) {
+  if (!dailyMaxLossHit && dailyPnL <= -MAX_LOSS) {
     dailyMaxLossHit = true;
     console.log(`⚠️ MAX DAILY LOSS HIT: $${dailyPnL.toFixed(2)} — trading halted for today`);
   }
 }
 
-// ---------- ALPACA SYNC ----------
+// ----------------- ALPACA SYNC -----------------
 async function updateEquityAndPositions() {
   if (!ALPACA_KEY) {
     console.log("No Alpaca keys — using mock $100k");
@@ -93,7 +97,7 @@ async function updateEquityAndPositions() {
   }
 }
 
-// ---------- YAHOO TOP GAINERS ----------
+// ----------------- YAHOO TOP GAINERS -----------------
 async function getTopGainers() {
   const now = Date.now();
   if (now - lastScanTime < 60000 && lastGainers.length) return lastGainers;
@@ -134,7 +138,7 @@ async function getTopGainers() {
   }
 }
 
-// ---------- POSITION MANAGEMENT ----------
+// ----------------- POSITION MANAGEMENT -----------------
 async function managePositions() {
   for (const pos of positions.slice()) {
     const pnlPct = (pos.current - pos.entry) / pos.entry;
@@ -142,28 +146,41 @@ async function managePositions() {
     // Take Profit +25%
     if (pnlPct >= 0.25) {
       logTrade("EXIT", pos.symbol, pos.qty, pos.current, "Take Profit +25%", pnlPct * pos.qty * pos.entry);
-      if (!DRY && !dailyMaxLossHit) await axios.post(`${A_BASE}/orders`, { symbol: pos.symbol, qty: pos.qty, side: "sell", type: "market", time_in_force: "day" }, { headers: HEADERS });
+      if (!DRY && !dailyMaxLossHit) await exitPosition(pos.symbol, pos.qty);
       positions = positions.filter(p => p.symbol !== pos.symbol);
     }
     // Trailing Stop -8%
     else if (pos.highestPrice && pos.current < pos.highestPrice * 0.92) {
       logTrade("EXIT", pos.symbol, pos.qty, pos.current, "Trailing Stop -8%", (pos.current - pos.entry) * pos.qty);
-      if (!DRY && !dailyMaxLossHit) await axios.post(`${A_BASE}/orders`, { symbol: pos.symbol, qty: pos.qty, side: "sell", type: "market", time_in_force: "day" }, { headers: HEADERS });
+      if (!DRY && !dailyMaxLossHit) await exitPosition(pos.symbol, pos.qty);
       positions = positions.filter(p => p.symbol !== pos.symbol);
     }
     // Hard Stop -12%
     else if (pnlPct <= -0.12) {
       logTrade("EXIT", pos.symbol, pos.qty, pos.current, "Hard Stop -12%", (pos.current - pos.entry) * pos.qty);
-      if (!DRY && !dailyMaxLossHit) await axios.post(`${A_BASE}/orders`, { symbol: pos.symbol, qty: pos.qty, side: "sell", type: "market", time_in_force: "day" }, { headers: HEADERS });
+      if (!DRY && !dailyMaxLossHit) await exitPosition(pos.symbol, pos.qty);
       positions = positions.filter(p => p.symbol !== pos.symbol);
     }
   }
 }
 
-// ---------- PLACE ORDER ----------
+// ----------------- EXIT HELPER -----------------
+async function exitPosition(symbol, qty) {
+  if (dailyMaxLossHit) return;
+  try {
+    await axios.post(`${A_BASE}/orders`, {
+      symbol, qty, side: "sell", type: "market", time_in_force: "day"
+    }, { headers: HEADERS });
+  } catch (e) {
+    console.log(`Exit order failed for ${symbol}:`, e.response?.status || e.message);
+  }
+}
+
+// ----------------- PLACE ORDER -----------------
 async function placeOrder(symbol, qty, price) {
   if (dailyMaxLossHit) return;
   logTrade("ENTRY", symbol, qty, price, "Top Gainer Entry", 0);
+
   if (!DRY && !dailyMaxLossHit) {
     try {
       await axios.post(`${A_BASE}/orders`, {
@@ -175,7 +192,7 @@ async function placeOrder(symbol, qty, price) {
   }
 }
 
-// ---------- SCAN AND TRADE ----------
+// ----------------- SCAN AND TRADE -----------------
 async function scanAndTrade() {
   if (dailyMaxLossHit) return console.log("Trading halted — max daily loss reached.");
   await updateEquityAndPositions();
@@ -193,7 +210,7 @@ async function scanAndTrade() {
   }
 }
 
-// ---------- DASHBOARD ----------
+// ----------------- DASHBOARD -----------------
 app.get("/", async (req, res) => {
   await updateEquityAndPositions();
   const unrealized = positions.reduce((s, p) => s + (p.unrealized_pl || 0), 0);
@@ -202,8 +219,8 @@ app.get("/", async (req, res) => {
   const winRate = exits.length > 0 ? ((wins / exits.length) * 100).toFixed(1) + "%" : "0.0%";
 
   res.json({
-    bot: "AlphaStream v81.4",
-    version: "v81.4",
+    bot: "AlphaStream v82.0",
+    version: "v82.0",
     status: "ONLINE",
     mode: DRY ? "PAPER" : "LIVE",
     dry_mode: DRY,
@@ -222,19 +239,19 @@ app.get("/", async (req, res) => {
   });
 });
 
-// ---------- FORCE SCAN ----------
+// ----------------- FORCE SCAN -----------------
 app.post("/scan", async (req, res) => {
   console.log("FORCE SCAN TRIGGERED");
   await scanAndTrade();
   res.json({ ok: true });
 });
 
-// ---------- HEALTH ----------
+// ----------------- HEALTH -----------------
 app.get("/healthz", (req, res) => res.send("OK"));
 
-// ---------- START SERVER ----------
+// ----------------- START SERVER -----------------
 app.listen(Number(PORT), "0.0.0.0", async () => {
-  console.log(`\nALPHASTREAM v81.4 FULLY LIVE`);
+  console.log(`\nALPHASTREAM v82.0 FULLY LIVE`);
   await updateEquityAndPositions();
   setInterval(scanAndTrade, 300000); // every 5 min
   scanAndTrade();
