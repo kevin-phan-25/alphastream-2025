@@ -1,8 +1,9 @@
+# Use Debian-based Node image
 FROM node:20-slim
 
 WORKDIR /app
 
-# Install OS dependencies your bot might need
+# Install the libraries your bot or npm dependencies need
 RUN apt-get update && apt-get install -y \
     gconf-service \
     libasound2 \
@@ -14,9 +15,11 @@ RUN apt-get update && apt-get install -y \
     libgbm1 \
     && rm -rf /var/lib/apt/lists/*
 
+# Copy package files and install dependencies
 COPY package*.json ./
 RUN npm install --only=production
 
+# Copy app code
 COPY . .
 
 EXPOSE 8080
