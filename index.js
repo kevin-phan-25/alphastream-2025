@@ -1,9 +1,9 @@
-// index.js — AlphaStream v82.1 — PROP-FIRM READY + YAHOO SCRAPER FIXED
+// index.js — AlphaStream v83.0 — PROP-FIRM READY + PUPPETEER YAHOO SCRAPER
 import express from "express";
 import cors from "cors";
 import axios from "axios";
-import * as cheerio from "cheerio";
 import fs from "fs";
+import puppeteer from "puppeteer";
 
 const app = express();
 app.use(cors());
@@ -106,99 +106,70 @@ async function updateEquityAndPositions() {
   }
 }
 
-// ----------------- YAHOO SCRAPER — FIXED v82.1 -----------------
+// ----------------- PUPPETEER YAHOO SCRAPER -----------------
 async function getTopGainers() {
   const now = Date.now();
   if (now - lastScanTime < 60000 && lastGainers.length) return lastGainers;
 
+  console.log("🚀 Launching Puppeteer for Yahoo Gainers scan...");
+  let browser;
   try {
-    const res = await axios.get("https://finance.yahoo.com/gainers", {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130 Safari/537.36",
-        Accept: "text/html",
-        Connection: "keep-alive"
-      },
-      timeout: 20000
+    browser = await puppeteer.launch({
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox"]
     });
 
-    const $ = cheerio.load(res.data);
+    const page = await browser.newPage();
+    await page.setUserAgent(
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130 Safari/537.36"
+    );
 
-    // Auto-detect the correct table
-    const table =
-      $("table[data-test='content-table']")
-        .first()
-        .find("tbody tr")
-        .toArray() || $("table tbody tr").toArray();
+    await page.goto("https://finance.yahoo.com/gainers", { waitUntil: "networkidle2", timeout: 30000 });
 
-    const candidates = [];
+    await page.waitForSelector("table tbody tr", { timeout: 15000 });
 
-    for (const row of table.slice(0, 60)) {
-      const tds = $(row).find("td");
+    const candidates = await page.evaluate((positions) => {
+      const rows = Array.from(document.querySelectorAll("table tbody tr")).slice(0, 50);
+      const result = [];
 
-      // auto-adaptive field mapping
-      const symbol =
-        tds.eq(0).find("a").text().trim() || tds.eq(0).text().trim();
+      for (const row of rows) {
+        const cells = row.querySelectorAll("td");
+        const symbol = cells[0]?.innerText?.trim();
+        const price = parseFloat(cells[2]?.innerText.replace(/,/g, "")) || 0;
+        const changeText = cells[3]?.innerText?.trim() || "";
+        const change = parseFloat(changeText.replace("%", ""));
+        const volumeText = cells[5]?.innerText?.trim() || "";
+        let volume = 0;
+        if (volumeText.includes("M")) volume = parseFloat(volumeText) * 1e6;
+        else if (volumeText.includes("K")) volume = parseFloat(volumeText) * 1e3;
+        else volume = parseFloat(volumeText.replace(/,/g, "")) || 0;
 
-      const priceText =
-        tds.eq(2).text().trim() ||
-        tds
-          .filter((_, el) => $(el).text().match(/^\d+(\.\d+)?$/))
-          .first()
-          .text();
+        if (!symbol || !changeText.includes("+")) continue;
 
-      const price = parseFloat(priceText.replace(/,/g, "")) || 0;
-
-      const changePctText =
-        tds.eq(3).text().trim() ||
-        tds
-          .filter((_, el) => $(el).text().includes("%"))
-          .first()
-          .text();
-
-      const changePct = parseFloat(changePctText);
-
-      const volumeText =
-        tds.eq(5).text().trim() ||
-        tds
-          .filter((_, el) => $(el).text().match(/[0-9\.]+[MK]?/))
-          .last()
-          .text();
-
-      const volNum = volumeText.includes("M")
-        ? parseFloat(volumeText) * 1e6
-        : volumeText.includes("K")
-        ? parseFloat(volumeText) * 1e3
-        : parseFloat(volumeText.replace(/,/g, "")) || 0;
-
-      if (!symbol || !changePctText.includes("+")) continue;
-
-      // Apply your criteria
-      if (
-        changePct >= 7.5 &&
-        volNum >= 800000 &&
-        price >= 8 &&
-        price <= 350 &&
-        !positions.some((p) => p.symbol === symbol)
-      ) {
-        candidates.push({ symbol, price, change: changePct });
+        if (change >= 7.5 && volume >= 800000 && price >= 8 && price <= 350 && !positions.some(p => p.symbol === symbol)) {
+          result.push({ symbol, price, change });
+        }
       }
-    }
+      return result.slice(0, 8);
+    }, positions);
 
-    lastGainers = candidates.slice(0, 8);
+    lastGainers = candidates;
     lastScanTime = now;
 
     console.log(
       `Yahoo → ${lastGainers.length} gainers: ${lastGainers
-        .map((r) => `${r.symbol} +${r.change}%`)
+        .map(r => `${r.symbol} +${r.change}%`)
         .join(", ")}`
     );
 
-    return lastGainers;
   } catch (e) {
     console.log("SCRAPER ERROR:", e.message);
-    return lastGainers;
+  } finally {
+    if (browser) await browser.close();
   }
+
+  return lastGainers;
 }
 
 // ----------------- POSITION MANAGEMENT -----------------
@@ -207,40 +178,16 @@ async function managePositions() {
     const pnlPct = (pos.current - pos.entry) / pos.entry;
 
     if (pnlPct >= 0.25) {
-      logTrade(
-        "EXIT",
-        pos.symbol,
-        pos.qty,
-        pos.current,
-        "Take Profit +25%",
-        pnlPct * pos.qty * pos.entry
-      );
-      if (!DRY && !dailyMaxLossHit)
-        await exitPosition(pos.symbol, pos.qty);
+      logTrade("EXIT", pos.symbol, pos.qty, pos.current, "Take Profit +25%", pnlPct * pos.qty * pos.entry);
+      if (!DRY && !dailyMaxLossHit) await exitPosition(pos.symbol, pos.qty);
       positions = positions.filter((p) => p.symbol !== pos.symbol);
     } else if (pos.highestPrice && pos.current < pos.highestPrice * 0.92) {
-      logTrade(
-        "EXIT",
-        pos.symbol,
-        pos.qty,
-        pos.current,
-        "Trailing Stop -8%",
-        (pos.current - pos.entry) * pos.qty
-      );
-      if (!DRY && !dailyMaxLossHit)
-        await exitPosition(pos.symbol, pos.qty);
+      logTrade("EXIT", pos.symbol, pos.qty, pos.current, "Trailing Stop -8%", (pos.current - pos.entry) * pos.qty);
+      if (!DRY && !dailyMaxLossHit) await exitPosition(pos.symbol, pos.qty);
       positions = positions.filter((p) => p.symbol !== pos.symbol);
     } else if (pnlPct <= -0.12) {
-      logTrade(
-        "EXIT",
-        pos.symbol,
-        pos.qty,
-        pos.current,
-        "Hard Stop -12%",
-        (pos.current - pos.entry) * pos.qty
-      );
-      if (!DRY && !dailyMaxLossHit)
-        await exitPosition(pos.symbol, pos.qty);
+      logTrade("EXIT", pos.symbol, pos.qty, pos.current, "Hard Stop -12%", (pos.current - pos.entry) * pos.qty);
+      if (!DRY && !dailyMaxLossHit) await exitPosition(pos.symbol, pos.qty);
       positions = positions.filter((p) => p.symbol !== pos.symbol);
     }
   }
@@ -252,13 +199,7 @@ async function exitPosition(symbol, qty) {
   try {
     await axios.post(
       `${A_BASE}/orders`,
-      {
-        symbol,
-        qty,
-        side: "sell",
-        type: "market",
-        time_in_force: "day"
-      },
+      { symbol, qty, side: "sell", type: "market", time_in_force: "day" },
       { headers: HEADERS }
     );
   } catch (e) {
@@ -275,13 +216,7 @@ async function placeOrder(symbol, qty, price) {
     try {
       await axios.post(
         `${A_BASE}/orders`,
-        {
-          symbol,
-          qty,
-          side: "buy",
-          type: "market",
-          time_in_force: "day"
-        },
+        { symbol, qty, side: "buy", type: "market", time_in_force: "day" },
         { headers: HEADERS }
       );
     } catch (e) {
@@ -292,8 +227,7 @@ async function placeOrder(symbol, qty, price) {
 
 // ----------------- SCAN AND TRADE -----------------
 async function scanAndTrade() {
-  if (dailyMaxLossHit)
-    return console.log("Trading halted — max daily loss reached.");
+  if (dailyMaxLossHit) return console.log("Trading halted — max daily loss reached.");
 
   await updateEquityAndPositions();
   await managePositions();
@@ -306,11 +240,7 @@ async function scanAndTrade() {
     if (positions.length >= 5) break;
     if (positions.some((p) => p.symbol === c.symbol)) continue;
 
-    const qty = Math.max(
-      1,
-      Math.floor((accountEquity * 0.02) / c.price)
-    );
-
+    const qty = Math.max(1, Math.floor((accountEquity * 0.02) / c.price));
     await placeOrder(c.symbol, qty, c.price);
     await new Promise((r) => setTimeout(r, 4000));
   }
@@ -323,28 +253,19 @@ app.get("/", async (req, res) => {
 
   const exits = tradeLog.filter((t) => t.type === "EXIT");
   const wins = exits.filter((t) => parseFloat(t.pnl) > 0).length;
-  const winRate =
-    exits.length > 0 ? `${((wins / exits.length) * 100).toFixed(1)}%` : "0.0%";
+  const winRate = exits.length > 0 ? `${((wins / exits.length) * 100).toFixed(1)}%` : "0.0%";
 
   res.json({
-    bot: "AlphaStream v82.1",
+    bot: "AlphaStream v83.0",
     status: "ONLINE",
     mode: DRY ? "PAPER" : "LIVE",
     dailyMaxLossHit,
     equity: `$${accountEquity.toFixed(2)}`,
-    dailyPnL:
-      unrealized >= 0
-        ? `+$${unrealized.toFixed(2)}`
-        : `-$${Math.abs(unrealized).toFixed(2)}`,
+    dailyPnL: unrealized >= 0 ? `+$${unrealized.toFixed(2)}` : `-$${Math.abs(unrealized).toFixed(2)}`,
     positions_count: positions.length,
     positions: positions.length ? positions : null,
     tradeLog: tradeLog.slice(-40),
-    backtest: {
-      totalTrades: tradeLog.length,
-      winRate,
-      wins,
-      losses: exits.length - wins
-    }
+    backtest: { totalTrades: tradeLog.length, winRate, wins, losses: exits.length - wins }
   });
 });
 
@@ -360,8 +281,8 @@ app.get("/healthz", (req, res) => res.send("OK"));
 
 // ----------------- START SERVER -----------------
 app.listen(Number(PORT), "0.0.0.0", async () => {
-  console.log(`\nALPHASTREAM v82.1 FULLY LIVE`);
+  console.log(`\nALPHASTREAM v83.0 FULLY LIVE`);
   await updateEquityAndPositions();
-  setInterval(scanAndTrade, 300000);
+  setInterval(scanAndTrade, 300000); // scan every 5 min
   scanAndTrade();
 });
