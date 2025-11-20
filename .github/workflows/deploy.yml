@@ -18,6 +18,9 @@ jobs:
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
+      - name: Install Dependencies
+        run: npm install  # This installs cheerio from your updated package.json
+
       - name: Deploy to Cloud Run
         run: |
           gcloud run deploy alphastream-autopilot \
@@ -29,7 +32,9 @@ jobs:
             --port=8080 \
             --timeout=300 \
             --memory=1Gi \
+            --cpu=1 \
+            --max-instances=10 \
             --set-env-vars=ALPACA_KEY=${{ secrets.ALPACA_KEY }} \
             --set-env-vars=ALPACA_SECRET=${{ secrets.ALPACA_SECRET }} \
-            --set-env-vars=FMP_KEY=${{ secrets.FMP_KEY }} \
-            --set-env-vars=DRY_MODE=true     # ← PAPER TRADING = TRUE
+            --set-env-vars=DRY_MODE=true \
+            --no-cpu-throttling
