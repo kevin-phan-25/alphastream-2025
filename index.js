@@ -1,4 +1,4 @@
-// index.js — AlphaStream v44.0 — FULL MASSIVE.COM API LEVERAGE + AUTOMATED
+// index.js — AlphaStream v46.0 — FINAL VERSION (Massive.com Fixed + Dashboard Works)
 import express from "express";
 import cors from "cors";
 import axios from "axios";
@@ -7,15 +7,22 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// ==================== CONFIG (ENV) ====================
 const {
   ALPACA_KEY = "",
   ALPACA_SECRET = "",
-  MASSIVE_KEY = "",           // ← Your Massive.com Bearer token
+  MASSIVE_KEY = "",                    // ← Your Massive.com Bearer token
   DRY_MODE = "true",
+  MAX_POSITIONS = "5",
+  POSITION_RISK_PCT = "0.02",          // 2% per trade
+  MIN_GAINER_PCT = "7.5",
+  MIN_GAINER_VOLUME = "800000",
+  MIN_PRICE = "8",
+  MAX_PRICE = "350",
   PORT = "8080"
 } = process.env;
 
-const DRY = String(DRY_MODE).toLowerCase() === "true";
+const DRY = DRY_MODE.toLowerCase() === "true";
 const IS_PAPER = DRY || ALPACA_KEY.startsWith("PK");
 const A_BASE = IS_PAPER
   ? "https://paper-api.alpaca.markets/v2"
@@ -26,25 +33,16 @@ const HEADERS = {
   "APCA-API-SECRET-KEY": ALPACA_SECRET
 };
 
-// Massive.com Auth Headers
-const MASSIVE_HEADERS = {
-  "Authorization": `Bearer ${MASSIVE_KEY}`,
-  "Accept": "application/json"
-};
-
-console.log(`\nALPHASTREAM v44.0 — FULL MASSIVE.COM API`);
-console.log(`Mode → ${DRY ? "DRY (Paper)" : "LIVE (Real Money)"}\n`);
-
 // ==================== STATE ====================
 let accountEquity = 100000;
 let positions = [];
 let tradeLog = [];
-let backtestResults = { wins: 0, losses: 0, totalPnL: 0, trades: 0 };
+let stats = { wins: 0, losses: 0, totalPnL: 0, trades: 0 };
 
-// ==================== LOGGING + WIN RATE ====================
+// ==================== LOGGING + STATS ====================
 function logTrade(type, symbol, qty, price, reason = "") {
   const trade = {
-    id: Date.now() + Math.random().toString(36).substr(2, 9),
+    id: Date.now().toString(36) + Math.random().toString(36).substr(2, 9),
     type,
     symbol,
     qty: Number(qty),
@@ -61,177 +59,190 @@ function logTrade(type, symbol, qty, price, reason = "") {
       trade.pnl = pnl.toFixed(2);
       trade.pnlPct = pnlPct;
 
-      backtestResults.trades++;
-      backtestResults.totalPnL += pnl;
-      if (pnl > 0) backtestResults.wins++;
-      else backtestResults.losses++;
+      stats.trades++;
+      stats.totalPnL += pnl;
+      if (pnl > 0) stats.wins++;
+      else stats.losses++;
     }
   }
 
   tradeLog.push(trade);
   if (tradeLog.length > 200) tradeLog.shift();
 
-  console.log(`[TRADE ${type}] ${qty} ${symbol} @ $${price} | ${reason} ${type === "EXIT" ? `| P&L: $${trade.pnl} (${trade.pnlPct}%)` : ""}`);
+  console.log(
+    `[${type}] ${symbol} ×${qty} @ $${price} | ${reason}` +
+    (trade.pnl ? ` → P&L: $${trade.pnl} (${trade.pnlPct}%)` : "")
+  );
 }
 
-// ==================== ORDER EXECUTION ====================
-async function placeOrder(symbol, qty, side = "buy") {
+// ==================== ALPACA: ORDERS ====================
+async function placeOrder(symbol, qty) {
   if (DRY) {
     logTrade("ENTRY", symbol, qty, "market", "DRY MODE");
     return;
   }
 
   try {
-    const res = await axios.post(`${A_BASE}/orders`, {
-      symbol,
-      qty,
-      side,
-      type: "market",
-      time_in_force: "day"
-    }, { headers: HEADERS, timeout: 10000 });
-
-    const filledPrice = res.data.filled_avg_price || "market";
-    logTrade("ENTRY", symbol, qty, filledPrice, "Massive Momentum Signal");
-    return res.data;
+    const res = await axios.post(
+      `${A_BASE}/orders`,
+      { symbol, qty, side: "buy", type: "market", time_in_force: "day" },
+      { headers: HEADERS, timeout: 12000 }
+    );
+    const price = res.data.filled_avg_price || "market";
+    logTrade("ENTRY", symbol, qty, price, "Massive Top Mover");
   } catch (err) {
     console.log("Order failed:", err?.response?.data?.message || err.message);
   }
 }
 
 async function closePosition(symbol) {
+  const pos = positions.find(p => p.symbol === symbol);
+  if (!pos) return;
+
   if (DRY) {
-    const pos = positions.find(p => p.symbol === symbol);
-    if (pos) logTrade("EXIT", symbol, pos.qty, pos.current || pos.entry, "DRY MODE");
+    logTrade("EXIT", symbol, pos.qty, pos.current, "DRY EOD");
     return;
   }
 
   try {
     await axios.delete(`${A_BASE}/positions/${symbol}`, { headers: HEADERS });
-    const pos = positions.find(p => p.symbol === symbol);
-    if (pos) logTrade("EXIT", symbol, pos.qty, pos.current, "Trailing Stop / TP");
+    logTrade("EXIT", symbol, pos.qty, pos.current, "TP/SL or EOD");
   } catch (err) {
     console.log("Close failed:", err?.response?.data?.message || err.message);
   }
 }
 
-// ==================== EQUITY & POSITIONS ====================
+// ==================== ALPACA: ACCOUNT & POSITIONS ====================
 async function updateEquityAndPositions() {
   if (!ALPACA_KEY || !ALPACA_SECRET) return;
 
   try {
-    const [accountRes, positionsRes] = await Promise.all([
-      axios.get(`${A_BASE}/account`, { headers: HEADERS, timeout: 12000 }),
-      axios.get(`${A_BASE}/positions`, { headers: HEADERS, timeout: 12000 })
+    const [acct, pos] = await Promise.all([
+      axios.get(`${A_BASE}/account`, { headers: HEADERS }),
+      axios.get(`${A_BASE}/positions`, { headers: HEADERS })
     ]);
 
-    accountEquity = parseFloat(accountRes.data.equity || 100000);
-    positions = positionsRes.data.map(p => ({
+    accountEquity = parseFloat(acct.data.equity || 100000);
+    positions = pos.data.map(p => ({
       symbol: p.symbol,
       qty: Number(p.qty),
-      entry: parseFloat(p.avg_entry_price),
-      current: parseFloat(p.current_price),
-      market_value: parseFloat(p.market_value),
-      unrealized_pl: parseFloat(p.unrealized_pl),
-      unrealized_plpc: parseFloat(p.unrealized_plpc) * 100
+      entry: Number(p.avg_entry_price),
+      current: Number(p.current_price),
+      unrealized_pl: Number(p.unrealized_pl)
     }));
   } catch (err) {
-    console.error("Alpaca fetch error:", err.message);
+    console.log("Alpaca sync error:", err.message);
   }
 }
 
-// ==================== MASSIVE.COM TOP MARKET MOVERS — FIXED (NOV 2025 FREE TIER) ====================
+// ==================== MASSIVE.COM: TOP MOVERS (FIXED) ====================
 async function getMassiveGainers() {
   if (!MASSIVE_KEY) {
-    console.log("MASSIVE_KEY not set → skipping scan");
+    console.log("MASSIVE_KEY missing → scan skipped");
     return [];
   }
 
   try {
-    const res = await axios.get("https://api.massive.com/v2/snapshot/locale/us/markets/stocks/gainers", {
-      headers: {
-        "Authorization": `Bearer ${MASSIVE_KEY}`,  // ← FIXED: Bearer auth (free tier OK)
-        "Accept": "application/json"
-      },
-      timeout: 10000
-    });
+    const res = await axios.get(
+      "https://api.massive.com/v2/snapshot/locale/us/markets/stocks/gainers",
+      {
+        headers: {
+          Authorization: `Bearer ${MASSIVE_KEY}`,
+          Accept: "application/json"
+        },
+        timeout: 12000
+      }
+    );
 
     const gainers = res.data?.tickers || [];
-    console.log(`Massive Top Movers: ${gainers.length} gainers`);
+    console.log(`Massive returned ${gainers.length} top gainers`);
 
     return gainers
       .filter(t =>
-        t.todaysChangePerc >= 7.5 &&
-        t.volume >= 800000 &&
-        t.price >= 8 &&
-        t.price <= 350 &&
+        t.todaysChangePerc >= Number(MIN_GAINER_PCT) &&
+        t.volume >= Number(MIN_GAINER_VOLUME) &&
+        t.price >= Number(MIN_PRICE) &&
+        t.price <= Number(MAX_PRICE) &&
         !positions.some(p => p.symbol === t.symbol)
       )
-      .slice(0, 4)
-      .map(t => ({
-        symbol: t.symbol,
-        price: t.price
-      }));
+      .slice(0, Number(MAX_POSITIONS))
+      .map(t => ({ symbol: t.symbol, price: t.price }));
+
   } catch (err) {
-    console.log("Massive API error:", err.response?.status, err.response?.data?.message || err.message);
+    console.log("Massive API Error:", err.response?.status, err.response?.data?.message || err.message);
     return [];
   }
 }
 
-// ==================== TRADING LOOP ====================
+// ==================== CORE TRADING LOOP ====================
 async function tradingLoop() {
   await updateEquityAndPositions();
 
-  if (positions.length >= 5) return;
+  if (positions.length >= Number(MAX_POSITIONS)) {
+    console.log(`Max positions reached (${positions.length}/${MAX_POSITIONS})`);
+    return;
+  }
 
-  const signals = await getMassiveGainers();
-  for (const s of signals) {
-    if (positions.length >= 5) break;
-    const qty = Math.max(1, Math.floor(accountEquity * 0.02 / s.price));
-    await placeOrder(s.symbol, qty);
+  const candidates = await getMassiveGainers();
+  if (candidates.length === 0) return;
+
+  for (const c of candidates) {
+    if (positions.length >= Number(MAX_POSITIONS)) break;
+
+    const riskPct = Number(POSITION_RISK_PCT);
+    const qty = Math.max(1, Math.floor((accountEquity * riskPct) / c.price));
+
+    await placeOrder(c.symbol, qty);
+    await new Promise(r => setTimeout(r, 2000)); // Be nice to rate limits
   }
 }
 
-// ==================== DASHBOARD ENDPOINT ====================
+// ==================== DASHBOARD API ====================
 app.get("/", async (req, res) => {
   await updateEquityAndPositions();
-  const totalPnL = positions.reduce((sum, p) => sum + p.unrealized_pl, 0);
-  const winRate = backtestResults.trades > 0
-    ? ((backtestResults.wins / backtestResults.trades) * 100).toFixed(1)
-    : "0.0";
+  const unrealizedPnL = positions.reduce((sum, p) => sum + p.unrealized_pl, 0);
+  const winRate = stats.trades > 0 ? ((stats.wins / stats.trades) * 100).toFixed(1) : "0.0";
 
   res.json({
-    bot: "AlphaStream v42.0 — Top Market Movers",
-    version: "v42.0",
+    bot: "AlphaStream v46.0",
+    version: "v46.0",
     status: "ONLINE",
     mode: DRY ? "DRY" : "LIVE",
     dry_mode: DRY,
     positions_count: positions.length,
-    max_pos: 5,
-    equity: `$${accountEquity.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
-    dailyPnL: totalPnL >= 0 ? `+$${totalPnL.toFixed(2)}` : `-$${Math.abs(totalPnL).toFixed(2)}`,
+    max_pos: Number(MAX_POSITIONS),
+    equity: `$${accountEquity.toFixed(2)}`,
+    dailyPnL: unrealizedPnL >= 0 ? `+$${unrealizedPnL.toFixed(2)}` : `-$${Math.abs(unrealizedPnL).toFixed(2)}`,
     positions,
     tradeLog: tradeLog.slice(-30),
     backtest: {
-      totalTrades: backtestResults.trades,
+      totalTrades: stats.trades,
       winRate: `${winRate}%`,
-      totalPnL: backtestResults.totalPnL.toFixed(2),
-      wins: backtestResults.wins,
-      losses: backtestResults.losses
+      totalPnL: stats.totalPnL.toFixed(2),
+      wins: stats.wins,
+      losses: stats.losses
     },
     timestamp: new Date().toISOString()
   });
 });
 
 app.get("/healthz", (req, res) => res.send("OK"));
-app.post("/manual/scan", async (req, res) => {
+
+// This endpoint makes your "FORCE SCAN" button work instantly
+app.post("/scan", async (req, res) => {
+  console.log("Manual scan triggered from dashboard");
   await tradingLoop();
-  res.json({ ok: true });
+  res.json({ ok: true, message: "Scan complete" });
 });
 
-const PORT_NUM = parseInt(PORT, 10);
+// ==================== START ====================
+const PORT_NUM = Number(PORT);
 app.listen(PORT_NUM, "0.0.0.0", () => {
-  console.log(`\nALPHASTREAM v42.0 LIVE ON PORT ${PORT_NUM}`);
-  console.log(`Dashboard → https://alphastream-dashboard.vercel.app\n`);
-  setInterval(tradingLoop, 60000);
-  tradingLoop();
+  console.log(`\nAlphaStream v46.0 LIVE on port ${PORT_NUM}`);
+  console.log(`Dashboard: https://alphastream-dashboard.vercel.app`);
+  console.log(`Mode: ${DRY ? "DRY (Paper)" : "LIVE"}\n`);
+
+  // Start automated scanning
+  setInterval(tradingLoop, 60_000);
+  tradingLoop(); // Run immediately on start
 });
