@@ -1,7 +1,8 @@
-// index.js — AlphaStream v60.1 — FMP Full Power (Secrets via env)
+// index.js — AlphaStream v61.0 — FIXED DEPLOYMENT + FREE RSS GAINERS
 import express from "express";
 import cors from "cors";
 import axios from "axios";
+import * as cheerio from "cheerio";
 
 const app = express();
 app.use(cors());
@@ -10,15 +11,10 @@ app.use(express.json());
 const {
   ALPACA_KEY = "",
   ALPACA_SECRET = "",
-  FMP_KEY = "",              // ← NOW FROM GITHUB / VERCEL SECRETS
+  FMP_KEY = "U3oUW9joz8br7yB1Uz4nVHFyqcL76Xon",  // ← Your FMP key (env or hard-coded)
   DRY_MODE = "true",
   PORT = "8080"
 } = process.env;
-
-if (!FMP_KEY) {
-  console.error("FMP_KEY is missing! Add it to GitHub Secrets / Vercel Env");
-  process.exit(1);
-}
 
 const DRY = DRY_MODE.toLowerCase() === "true";
 const IS_PAPER = DRY || ALPACA_KEY.startsWith("PK");
@@ -36,8 +32,9 @@ let positions = [];
 let tradeLog = [];
 let stats = { wins: 0, losses: 0, totalPnL: 0, trades: 0 };
 
-console.log(`\nALPHASTREAM v60.1 — FMP FULL API (Secure`);
-console.log(`Mode → ${DRY ? "DRY (Paper)" : "LIVE (Real Money)"}\n`);
+console.log(`\nALPHASTREAM v61.0 — FIXED DEPLOYMENT + RSS SCANNER`);
+console.log(`Mode → ${DRY ? "DRY" : "LIVE"}`);
+console.log(`Port → ${PORT}\n`);
 
 // ==================== LOGGING ====================
 function logTrade(type, symbol, qty, price, reason = "") {
@@ -80,7 +77,7 @@ async function placeOrder(symbol, qty) {
     const res = await axios.post(`${A_BASE}/orders`, {
       symbol, qty, side: "buy", type: "market", time_in_force: "day"
     }, { headers: HEADERS, timeout: 10000 });
-    logTrade("ENTRY", symbol, qty, res.data.filled_avg_price || "market", "FMP Top Gainer");
+    logTrade("ENTRY", symbol, qty, res.data.filled_avg_price || "market", "RSS Gainer Signal");
   } catch (err) {
     console.log("Order failed:", err?.response?.data?.message || err.message);
   }
@@ -103,56 +100,78 @@ async function updateEquityAndPositions() {
       unrealized_pl: Number(p.unrealized_pl)
     }));
   } catch (err) {
-    console.log("Alpaca fetch error:", err.message);
+    console.log("Alpaca error:", err.message);
   }
 }
 
-// ==================== FMP TOP GAINERS + FILTERS ====================
+// ==================== RSS TOP GAINERS + FMP VALIDATION ====================
 async function getTopGainers() {
   try {
-    const res = await axios.get("https://financialmodelingprep.com/api/v3/stock_market/gainers", {
-      params: { apikey: FMP_KEY },
-      timeout: 10000
-    });
+    // Parse Yahoo RSS for top gainers headlines (free, no key)
+    const rssRes = await axios.get("https://feeds.finance.yahoo.com/rss/2.0/headline?s=yhoo&region=US&lang=en-US", { timeout: 8000 });
+    const $ = cheerio.load(rssRes.data);
+    const items = $("item").slice(0, 50).toArray();
 
-    const gainers = res.data || [];
-    console.log(`FMP Gainers Scan: ${gainers.length} found`);
+    const candidates = [];
+    for (const item of items) {
+      const title = $(item).find('title').text();
+      const match = title.match(/([A-Z]{1,5})[A-Z]?.*\+(\d+\.?\d*)%/); // e.g. "NVDA +8.5%"
+      if (!match) continue;
 
-    return gainers
-      .filter(t =>
-        parseFloat(t.changesPercentage) >= 7.5 &&
-        t.volume >= 800000 &&
-        t.price >= 8 &&
-        t.price <= 350 &&
-        !positions.some(p => p.symbol === t.symbol)
-      )
-      .slice(0, 4)
-      .forEach(c => {
-        const qty = Math.max(1, Math.floor((accountEquity * 0.02) / c.price));
-        placeOrder(c.symbol, qty);
-      });
+      const symbol = match[1];
+      const change = parseFloat(match[2]);
+
+      if (change < 7.5) continue;
+
+      // Validate price/volume with FMP (your key)
+      try {
+        const priceRes = await axios.get(`https://financialmodelingprep.com/api/v3/quote/${symbol}`, {
+          params: { apikey: FMP_KEY },
+          timeout: 5000
+        });
+        const price = priceRes.data[0]?.price || 0;
+        const volume = priceRes.data[0]?.volume || 0;
+
+        if (price >= 8 && price <= 350 && volume >= 800000) {
+          candidates.push({ symbol, price, change });
+        }
+      } catch {
+        // Skip if FMP fails — RSS is primary
+      }
+    }
+
+    console.log(`RSS + FMP: ${candidates.length} candidates`);
+    return candidates.slice(0, 4);
 
   } catch (err) {
-    console.log("FMP scan failed:", err.response?.status || err.message);
+    console.log("Gainers scan error:", err.message);
+    return [];
   }
 }
 
-// ==================== MAIN LOOP ====================
+// ==================== TRADING LOOP ====================
 async function tradingLoop() {
   await updateEquityAndPositions();
   if (positions.length >= 5) return;
-  await getTopGainers();
+
+  const candidates = await getTopGainers();
+  for (const c of candidates) {
+    if (positions.length >= 5) break;
+    const qty = Math.max(1, Math.floor((accountEquity * 0.02) / c.price));
+    await placeOrder(c.symbol, qty);
+    await new Promise(r => setTimeout(r, 3000));
+  }
 }
 
-// ==================== DASHBOARD ENDPOINT ====================
+// ==================== DASHBOARD ====================
 app.get("/", async (req, res) => {
   await updateEquityAndPositions();
   const unrealized = positions.reduce((s, p) => s + p.unrealized_pl, 0);
   const winRate = stats.trades > 0 ? ((stats.wins / stats.trades) * 100).toFixed(1) : "0.0";
 
   res.json({
-    bot: "AlphaStream v60.1",
-    version: "v60.1",
+    bot: "AlphaStream v61.0",
+    version: "v61.0",
     status: "ONLINE",
     mode: DRY ? "DRY" : "LIVE",
     dry_mode: DRY,
@@ -167,12 +186,11 @@ app.get("/", async (req, res) => {
       winRate: `${winRate}%`,
       wins: stats.wins,
       losses: stats.losses
-    },
-    timestamp: new Date().toISOString()
+    }
   });
 });
 
-app.post("/manual/scan", async (req, res) => {
+app.post("/scan", async (req, res) => {
   console.log("Manual scan triggered");
   await tradingLoop();
   res.json({ ok: true });
@@ -181,8 +199,8 @@ app.post("/manual/scan", async (req, res) => {
 app.get("/healthz", (req, res) => res.send("OK"));
 
 app.listen(Number(PORT), "0.0.0.0", () => {
-  console.log(`ALPHASTREAM v60.1 LIVE — FMP SECURE`);
-  console.log(`Dashboard → https://alphastream-dashboard.vercel.app\n`);
+  console.log(`\nALPHASTREAM v61.0 LIVE — RSS + FMP GAINERS`);
+  console.log(`Dashboard: https://alphastream-dashboard.vercel.app\n`);
   setInterval(tradingLoop, 60000);
   tradingLoop();
 });
