@@ -1,15 +1,15 @@
 {
   "name": "alphastream",
-  "version": "35.0.0",
+  "version": "75.0.0",
   "type": "module",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "axios": "^1.6.0",
+    "axios": "^1.7.7",
+    "cheerio": "^1.0.0-rc.12",
     "cors": "^2.8.5",
-    "express": "^4.18.2",
-    "technicalindicators": "^3.0.11"
+    "express": "^4.19.2"
   }
 }
