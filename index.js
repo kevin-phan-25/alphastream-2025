@@ -1,4 +1,4 @@
-// index.js — AlphaStream v47.0 — FIXED MASSIVE.COM (NO POLYGON 403) + AUTOMATED
+// index.js — AlphaStream v49.0 — PURE MASSIVE.COM (NO POLYGON, NO 403)
 import express from "express";
 import cors from "cors";
 import axios from "axios";
@@ -10,12 +10,12 @@ app.use(express.json());
 const {
   ALPACA_KEY = "",
   ALPACA_SECRET = "",
-  MASSIVE_KEY = "",           // ← Your Massive.com Bearer token (free tier OK)
+  MASSIVE_KEY = "",           // ← Your Massive.com Bearer token
   DRY_MODE = "true",
   PORT = "8080"
 } = process.env;
 
-const DRY = String(DRY_MODE).toLowerCase() === "true";
+const DRY = DRY_MODE.toLowerCase() === "true";
 const IS_PAPER = DRY || ALPACA_KEY.startsWith("PK");
 const A_BASE = IS_PAPER
   ? "https://paper-api.alpaca.markets/v2"
@@ -26,16 +26,15 @@ const HEADERS = {
   "APCA-API-SECRET-KEY": ALPACA_SECRET
 };
 
-console.log(`\nALPHASTREAM v47.0 — FIXED MASSIVE.COM (NO POLYGON 403)`);
-console.log(`Mode → ${DRY ? "DRY (Paper)" : "LIVE (Real Money)"}\n`);
-
-// ==================== STATE ====================
 let accountEquity = 100000;
 let positions = [];
 let tradeLog = [];
-let backtestResults = { wins: 0, losses: 0, totalPnL: 0, trades: 0 };
+let stats = { wins: 0, losses: 0, totalPnL: 0, trades: 0 };
 
-// ==================== LOGGING + WIN RATE ====================
+console.log(`\nALPHASTREAM v49.0 — PURE MASSIVE.COM`);
+console.log(`Mode → ${DRY ? "DRY" : "LIVE"}\n`);
+
+// ==================== LOGGING ====================
 function logTrade(type, symbol, qty, price, reason = "") {
   const trade = {
     id: Date.now() + Math.random().toString(36).substr(2, 9),
@@ -54,119 +53,93 @@ function logTrade(type, symbol, qty, price, reason = "") {
       const pnlPct = ((pnl / (entry.price * qty)) * 100).toFixed(2);
       trade.pnl = pnl.toFixed(2);
       trade.pnlPct = pnlPct;
-
-      backtestResults.trades++;
-      backtestResults.totalPnL += pnl;
-      if (pnl > 0) backtestResults.wins++;
-      else backtestResults.losses++;
+      stats.trades++;
+      stats.totalPnL += pnl;
+      pnl > 0 ? stats.wins++ : stats.losses++;
     }
   }
 
   tradeLog.push(trade);
   if (tradeLog.length > 200) tradeLog.shift();
 
-  console.log(`[TRADE ${type}] ${qty} ${symbol} @ $${price} | ${reason} ${type === "EXIT" ? `| P&L: $${trade.pnl} (${trade.pnlPct}%)` : ""}`);
+  console.log(`[${type}] ${symbol} ×${qty} @ $${price} | ${reason}`);
 }
 
-// ==================== ORDER EXECUTION ====================
-async function placeOrder(symbol, qty, side = "buy") {
+// ==================== ORDERS ====================
+async function placeOrder(symbol, qty) {
   if (DRY) {
     logTrade("ENTRY", symbol, qty, "market", "DRY MODE");
     return;
   }
-
   try {
     const res = await axios.post(`${A_BASE}/orders`, {
-      symbol,
-      qty,
-      side,
-      type: "market",
-      time_in_force: "day"
+      symbol, qty, side: "buy", type: "market", time_in_force: "day"
     }, { headers: HEADERS, timeout: 10000 });
-
-    const filledPrice = res.data.filled_avg_price || "market";
-    logTrade("ENTRY", symbol, qty, filledPrice, "Massive Top Mover Signal");
-    return res.data;
+    logTrade("ENTRY", symbol, qty, res.data.filled_avg_price || "market", "Massive Top Mover");
   } catch (err) {
     console.log("Order failed:", err?.response?.data?.message || err.message);
   }
 }
 
-async function closePosition(symbol) {
-  if (DRY) {
-    const pos = positions.find(p => p.symbol === symbol);
-    if (pos) logTrade("EXIT", symbol, pos.qty, pos.current || pos.entry, "DRY MODE");
-    return;
-  }
-
-  try {
-    await axios.delete(`${A_BASE}/positions/${symbol}`, { headers: HEADERS });
-    const pos = positions.find(p => p.symbol === symbol);
-    if (pos) logTrade("EXIT", symbol, pos.qty, pos.current, "Trailing Stop / TP");
-  } catch (err) {
-    console.log("Close failed:", err?.response?.data?.message || err.message);
-  }
-}
-
-// ==================== EQUITY & POSITIONS ====================
+// ==================== ACCOUNT & POSITIONS ====================
 async function updateEquityAndPositions() {
   if (!ALPACA_KEY || !ALPACA_SECRET) return;
-
   try {
-    const [accountRes, positionsRes] = await Promise.all([
-      axios.get(`${A_BASE}/account`, { headers: HEADERS, timeout: 12000 }),
-      axios.get(`${A_BASE}/positions`, { headers: HEADERS, timeout: 12000 })
+    const [acct, pos] = await Promise.all([
+      axios.get(`${A_BASE}/account`, { headers: HEADERS }),
+      axios.get(`${A_BASE}/positions`, { headers: HEADERS })
     ]);
-
-    accountEquity = parseFloat(accountRes.data.equity || 100000);
-    positions = positionsRes.data.map(p => ({
+    accountEquity = parseFloat(acct.data.equity || 100000);
+    positions = pos.data.map(p => ({
       symbol: p.symbol,
       qty: Number(p.qty),
-      entry: parseFloat(p.avg_entry_price),
-      current: parseFloat(p.current_price),
-      market_value: parseFloat(p.market_value),
-      unrealized_pl: parseFloat(p.unrealized_pl),
-      unrealized_plpc: parseFloat(p.unrealized_plpc) * 100
+      entry: Number(p.avg_entry_price),
+      current: Number(p.current_price),
+      unrealized_pl: Number(p.unrealized_pl)
     }));
   } catch (err) {
-    console.error("Alpaca fetch error:", err.message);
+    console.log("Alpaca error:", err.message);
   }
 }
 
-// ==================== MASSIVE.COM TOP MARKET MOVERS — FIXED FOR FREE TIER (NOV 2025) ====================
-async function getMassiveGainers() {
+// ==================== MASSIVE.COM TOP MOVERS (FREE TIER) ====================
+async function getTopGainers() {
   if (!MASSIVE_KEY) {
-    console.log("MASSIVE_KEY not set → skipping scan");
+    console.log("MASSIVE_KEY missing → scan skipped");
     return [];
   }
 
   try {
     const res = await axios.get("https://api.massive.com/v2/snapshot/locale/us/markets/stocks/gainers", {
       headers: {
-        "Authorization": `Bearer ${MASSIVE_KEY}`,  // ← FIXED: Bearer auth (free tier OK)
-        "Accept": "application/json"
+        Authorization: `Bearer ${MASSIVE_KEY}`,
+        Accept: "application/json"
       },
       timeout: 10000
     });
 
-    const gainers = res.data?.tickers || [];
-    console.log(`Massive Top Movers: ${gainers.length} gainers`);
+    const tickers = res.data?.tickers || [];
+    console.log(`Massive Top Movers: ${tickers.length} gainers`);
 
-    return gainers
-      .filter(t =>
-        t.todaysChangePerc >= 7.5 &&
-        t.volume >= 800000 &&
-        t.price >= 8 &&
-        t.price <= 350 &&
-        !positions.some(p => p.symbol === t.symbol)
-      )
+    return tickers
+      .filter(t => {
+        const change = t.todaysChangePerc || 0;
+        const volume = t.volume || 0;
+        const price = t.price || 0;
+        return change >= 7.5 &&
+               volume >= 800000 &&
+               price >= 8 &&
+               price <= 350 &&
+               !positions.some(p => p.symbol === t.symbol);
+      })
       .slice(0, 4)
       .map(t => ({
         symbol: t.symbol,
         price: t.price
       }));
+
   } catch (err) {
-    console.log("Massive API error:", err.response?.status, err.response?.data?.message || err.message);
+    console.log("Massive API Error:", err.response?.status, err.response?.data?.message || err.message);
     return [];
   }
 }
@@ -174,58 +147,55 @@ async function getMassiveGainers() {
 // ==================== TRADING LOOP ====================
 async function tradingLoop() {
   await updateEquityAndPositions();
-
   if (positions.length >= 5) return;
 
-  const signals = await getMassiveGainers();
-  for (const s of signals) {
+  const candidates = await getTopGainers();
+  for (const c of candidates) {
     if (positions.length >= 5) break;
-    const qty = Math.max(1, Math.floor(accountEquity * 0.02 / s.price));
-    await placeOrder(s.symbol, qty);
+    const qty = Math.max(1, Math.floor((accountEquity * 0.02) / c.price));
+    await placeOrder(c.symbol, qty);
+    await new Promise(r => setTimeout(r, 3000)); // Rate limit
   }
 }
 
-// ==================== DASHBOARD ENDPOINT ====================
+// ==================== DASHBOARD ====================
 app.get("/", async (req, res) => {
   await updateEquityAndPositions();
-  const totalPnL = positions.reduce((sum, p) => sum + p.unrealized_pl, 0);
-  const winRate = backtestResults.trades > 0
-    ? ((backtestResults.wins / backtestResults.trades) * 100).toFixed(1)
-    : "0.0";
+  const unrealized = positions.reduce((s, p) => s + p.unrealized_pl, 0);
+  const winRate = stats.trades > 0 ? ((stats.wins / stats.trades) * 100).toFixed(1) : "0.0";
 
   res.json({
-    bot: "AlphaStream v47.0 — Top Market Movers",
-    version: "v47.0",
+    bot: "AlphaStream v49.0",
+    version: "v49.0",
     status: "ONLINE",
     mode: DRY ? "DRY" : "LIVE",
     dry_mode: DRY,
     positions_count: positions.length,
     max_pos: 5,
-    equity: `$${accountEquity.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
-    dailyPnL: totalPnL >= 0 ? `+$${totalPnL.toFixed(2)}` : `-$${Math.abs(totalPnL).toFixed(2)}`,
+    equity: `$${accountEquity.toFixed(2)}`,
+    dailyPnL: unrealized >= 0 ? `+$${unrealized.toFixed(2)}` : `-$${Math.abs(unrealized).toFixed(2)}`,
     positions,
     tradeLog: tradeLog.slice(-30),
     backtest: {
-      totalTrades: backtestResults.trades,
+      totalTrades: stats.trades,
       winRate: `${winRate}%`,
-      totalPnL: backtestResults.totalPnL.toFixed(2),
-      wins: backtestResults.wins,
-      losses: backtestResults.losses
-    },
-    timestamp: new Date().toISOString()
+      wins: stats.wins,
+      losses: stats.losses
+    }
   });
 });
 
-app.get("/healthz", (req, res) => res.send("OK"));
-app.post("/manual/scan", async (req, res) => {
+app.post("/scan", async (req, res) => {
+  console.log("Manual scan triggered");
   await tradingLoop();
   res.json({ ok: true });
 });
 
-const PORT_NUM = parseInt(PORT, 10);
-app.listen(PORT_NUM, "0.0.0.0", () => {
-  console.log(`\nALPHASTREAM v47.0 LIVE ON PORT ${PORT_NUM}`);
-  console.log(`Dashboard → https://alphastream-dashboard.vercel.app\n`);
+app.get("/healthz", (req, res) => res.send("OK"));
+
+app.listen(Number(PORT), "0.0.0.0", () => {
+  console.log(`\nALPHASTREAM v49.0 LIVE — NO MORE 403`);
+  console.log(`Dashboard: https://alphastream-dashboard.vercel.app\n`);
   setInterval(tradingLoop, 60000);
   tradingLoop();
 });
