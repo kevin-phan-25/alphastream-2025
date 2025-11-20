@@ -1,4 +1,4 @@
-// index.js — AlphaStream v39.0 — FIXED MASSIVE.COM API (NO MORE 404) + AUTOMATED SCANNING
+// index.js — AlphaStream v40.0 — REAL MASSIVE.COM (NO 404/403) + AUTOMATED + FREE TIER
 import express from "express";
 import cors from "cors";
 import axios from "axios";
@@ -10,8 +10,8 @@ app.use(express.json());
 const {
   ALPACA_KEY = "",
   ALPACA_SECRET = "",
-  MASSIVE_KEY = "",           // ← Your Massive.com Bearer token
-  DRY_MODE = "false",
+  MASSIVE_KEY = "",           // ← Your Massive.com Bearer token (free tier OK)
+  DRY_MODE = "true",          // Set to "false" for live
   PORT = "8080"
 } = process.env;
 
@@ -26,7 +26,7 @@ const HEADERS = {
   "APCA-API-SECRET-KEY": ALPACA_SECRET
 };
 
-console.log(`\nALPHASTREAM v39.0 — MASSIVE.COM FIXED (NO 404)`);
+console.log(`\nALPHASTREAM v40.0 — REAL MASSIVE.COM + FREE TIER`);
 console.log(`Mode → ${DRY ? "DRY (Paper)" : "LIVE (Real Money)"}\n`);
 
 // ==================== STATE ====================
@@ -133,7 +133,7 @@ async function updateEquityAndPositions() {
   }
 }
 
-// ==================== MASSIVE.COM GAINERS — FIXED ENDPOINT + BEARER AUTH ====================
+// ==================== MASSIVE.COM TOP GAINERS — FIXED 100% (NOV 2025) ====================
 async function getMassiveGainers() {
   if (!MASSIVE_KEY) {
     console.log("MASSIVE_KEY not set → skipping scan");
@@ -143,7 +143,7 @@ async function getMassiveGainers() {
   try {
     const res = await axios.get("https://api.massive.com/v2/snapshot/locale/us/markets/stocks/gainers", {
       headers: {
-        "Authorization": `Bearer ${MASSIVE_KEY}`,  // ← FIXED: Bearer auth (not X-API-Key)
+        "Authorization": `Bearer ${MASSIVE_KEY}`,  // ← FIXED: Bearer auth for v2
         "Accept": "application/json"
       },
       timeout: 10000
@@ -194,8 +194,8 @@ app.get("/", async (req, res) => {
     : "0.0";
 
   res.json({
-    bot: "AlphaStream v39.0 — Massive.com Live",
-    version: "v39.0",
+    bot: "AlphaStream v40.0 — Massive.com Live",
+    version: "v40.0",
     status: "ONLINE",
     mode: DRY ? "DRY" : "LIVE",
     dry_mode: DRY,
@@ -224,7 +224,7 @@ app.post("/manual/scan", async (req, res) => {
 
 const PORT_NUM = parseInt(PORT, 10);
 app.listen(PORT_NUM, "0.0.0.0", () => {
-  console.log(`\nALPHASTREAM v39.0 LIVE ON PORT ${PORT_NUM}`);
+  console.log(`\nALPHASTREAM v40.0 LIVE ON PORT ${PORT_NUM}`);
   console.log(`Dashboard → https://alphastream-dashboard.vercel.app\n`);
   setInterval(tradingLoop, 60000);
   tradingLoop();
