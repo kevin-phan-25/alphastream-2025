@@ -1,231 +1,232 @@
-// index.js — AlphaStream v39.0 — FIXED MASSIVE.COM API (NO MORE 404) + AUTOMATED SCANNING
-import express from "express";
-import cors from "cors";
-import axios from "axios";
+// src/app/page.tsx — FINAL DASHBOARD FOR AlphaStream v39.0+ (NOV 2025)
+'use client';
 
-const app = express();
-app.use(cors());
-app.use(express.json());
+import { useState, useEffect } from 'react';
+import axios from 'axios';
+import { Activity, Rocket, RefreshCw, X, TrendingUp, AlertTriangle, Zap } from 'lucide-react';
 
-const {
-  ALPACA_KEY = "",
-  ALPACA_SECRET = "",
-  MASSIVE_KEY = "",           // ← Your Massive.com Bearer token
-  DRY_MODE = "false",
-  PORT = "8080"
-} = process.env;
+export default function Home() {
+  const [data, setData] = useState<any>({});
+  const [loading, setLoading] = useState(true);
+  const [scanning, setScanning] = useState(false);
+  const [showPositions, setShowPositions] = useState(false);
 
-const DRY = String(DRY_MODE).toLowerCase() === "true";
-const IS_PAPER = DRY || ALPACA_KEY.startsWith("PK");
-const A_BASE = IS_PAPER
-  ? "https://paper-api.alpaca.markets/v2"
-  : "https://api.alpaca.markets/v2";
+  const BOT_URL = process.env.NEXT_PUBLIC_BOT_URL?.trim();
 
-const HEADERS = {
-  "APCA-API-KEY-ID": ALPACA_KEY,
-  "APCA-API-SECRET-KEY": ALPACA_SECRET
-};
-
-console.log(`\nALPHASTREAM v39.0 — MASSIVE.COM FIXED (NO 404)`);
-console.log(`Mode → ${DRY ? "DRY (Paper)" : "LIVE (Real Money)"}\n`);
-
-// ==================== STATE ====================
-let accountEquity = 100000;
-let positions = [];
-let tradeLog = [];
-let backtestResults = { wins: 0, losses: 0, totalPnL: 0, trades: 0 };
-
-// ==================== LOGGING + WIN RATE ====================
-function logTrade(type, symbol, qty, price, reason = "") {
-  const trade = {
-    id: Date.now() + Math.random().toString(36).substr(2, 9),
-    type,
-    symbol,
-    qty: Number(qty),
-    price: Number(price).toFixed(2),
-    timestamp: new Date().toISOString(),
-    reason
+  const fetchData = async () => {
+    if (!BOT_URL) return;
+    try {
+      const res = await axios.get(BOT_URL, { timeout: 12000 });
+      setData(res.data || {});
+      setLoading(false);
+    } catch (err) {
+      console.error("Bot offline or error");
+      setData({});
+      setLoading(false);
+    }
   };
 
-  if (type === "EXIT") {
-    const entry = tradeLog.findLast(t => t.type === "ENTRY" && t.symbol === symbol);
-    if (entry) {
-      const pnl = (price - entry.price) * qty;
-      const pnlPct = ((pnl / (entry.price * qty)) * 100).toFixed(2);
-      trade.pnl = pnl.toFixed(2);
-      trade.pnlPct = pnlPct;
+  useEffect(() => {
+    fetchData();
+    const id = setInterval(fetchData, 8000);
+    return () => clearInterval(id);
+  }, [BOT_URL]);
 
-      backtestResults.trades++;
-      backtestResults.totalPnL += pnl;
-      if (pnl > 0) backtestResults.wins++;
-      else backtestResults.losses++;
-    }
+  const triggerScan = async () => {
+    if (!BOT_URL) return;
+    setScanning(true);
+    try { await axios.post(`${BOT_URL}/manual/scan`); }
+    finally { setScanning(false); fetchData(); }
+  };
+
+  // Safe field extraction — works with v34 to v39+
+  const equity = data.equity || data.equity || "$0.00";
+  const dailyPnL = data.dailyPnL || "+$0.00";
+  const positionsCount = data.positions_count ?? data.positions?.length ?? data.positions ?? 0;
+  const winRate = data.backtest?.winRate || data.win_rate || "0.0%";
+  const totalTrades = data.backtest?.totalTrades || data.backtest?.trades || 0;
+  const isLive = (data.status === "ONLINE") && !data.dry_mode;
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-purple-900 via-black to-pink-900 flex items-center justify-center">
+        <div className="text-6xl font-black text-purple-400 animate-pulse">AlphaStream v39.0</div>
+      </div>
+    );
   }
 
-  tradeLog.push(trade);
-  if (tradeLog.length > 200) tradeLog.shift();
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-purple-900 via-black to-pink-900 text-white">
 
-  console.log(`[TRADE ${type}] ${qty} ${symbol} @ $${price} | ${reason} ${type === "EXIT" ? `| P&L: $${trade.pnl} (${trade.pnlPct}%)` : ""}`);
+      {/* Header */}
+      <header className="fixed top-0 w-full z-50 backdrop-blur-xl bg-black/80 border-b border-white/10">
+        <div className="max-w-7xl mx-auto px-6 py-5 flex justify-between items-center">
+          <h1 className="text-4xl md:text-5xl font-black bg-gradient-to-r from-purple-400 to-pink-400 bg-clip-text text-transparent">
+            AlphaStream v39.0
+          </h1>
+          <div className="flex items-center gap-6">
+            <span className="text-2xl font-bold text-cyan-400">ELITE AUTOMATION</span>
+            <span className={`px-8 py-4 rounded-full text-2xl font-black ${isLive ? 'bg-green-600' : 'bg-yellow-600'}`}>
+              {isLive ? "LIVE TRADING" : "PAPER MODE"}
+            </span>
+          </div>
+        </div>
+      </header>
+
+      <main className="pt-32 px-6 pb-32">
+        <div className="max-w-7xl mx-auto space-y-20">
+
+          {/* Hero */}
+          <div className="text-center">
+            <h2 className="text-7xl md:text-9xl font-black bg-gradient-to-r from-cyan-400 via-purple-400 to-pink-400 bg-clip-text text-transparent">
+              PROP CRUSHER
+            </h2>
+            <p className="text-3xl mt-6 text-gray-300">7.5%+ Gainers • 800k+ Volume • 4 Max Positions • Daily Loss Stop</p>
+          </div>
+
+          {/* Pulse */}
+          <div className="flex justify-center">
+            <div className="w-80 h-80 rounded-full bg-gradient-to-r from-green-600/40 to-cyan-600/40 border-12 border-green-400 shadow-2xl flex items-center justify-center animate-pulse">
+              <Zap className="w-48 h-48 text-green-400" />
+            </div>
+          </div>
+
+          {/* Main Stats */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-10">
+            <div className="bg-white/10 backdrop-blur-xl rounded-3xl p-10 border border-white/20 text-center">
+              <p className="text-gray-400 text-lg">EQUITY</p>
+              <p className="text-6xl md:text-3xl font-black text-cyan-400 mt-4">{equity}</p>
+            </div>
+
+            <div className="bg-white/10 backdrop-blur-xl rounded-3xl p-10 border border-white/20 text-center">
+              <p className="text-gray-400 text-lg">DAILY P&L</p>
+              <p className={`text-6xl md:text-3xl font-black mt-4 ${dailyPnL.includes('-') ? 'text-red-400' : 'text-green-400'}`}>
+                {dailyPnL}
+              </p>
+            </div>
+
+            <div 
+              onClick={() => setShowPositions(true)}
+              className="bg-white/10 backdrop-blur-xl rounded-3xl p-10 border border-white/20 text-center cursor-pointer hover:scale-105 transition"
+            >
+              <p className="text-gray-400 text-lg">POSITIONS</p>
+              <p className="text-7xl font-black text-purple-400 mt-4">
+                {positionsCount}<span className="text-5xl text-gray-400">/4</span>
+              </p>
+            </div>
+
+            <div className="bg-white/10 backdrop-blur-xl rounded-3xl p-10 border border-white/20 text-center">
+              <p className="text-gray-400 text-lg">WIN RATE</p>
+              <p className="text-7xl font-black text-yellow-400 mt-4">{winRate}</p>
+            </div>
+          </div>
+
+          {/* Win/Loss Counters */}
+          <div className="grid grid-cols-3 gap-10 max-w-4xl mx-auto">
+            <div className="bg-white/10 backdrop-blur-xl rounded-3xl p-10 border border-white/20 text-center">
+              <TrendingUp className="w-20 h-20 mx-auto text-green-400 mb-4" />
+              <p className="text-7xl font-black text-green-400">{data.backtest?.wins || 0}</p>
+              <p className="text-xl text-gray-400 mt-2">WINS</p>
+            </div>
+            <div className="bg-white/10 backdrop-blur-xl rounded-3xl p-10 border border-white/20 text-center">
+              <AlertTriangle className="w-20 h-20 mx-auto text-red-400 mb-4" />
+              <p className="text-7xl font-black text-red-400">{data.backtest?.losses || 0}</p>
+              <p className="text-xl text-gray-400 mt-2">LOSSES</p>
+            </div>
+            <div className="bg-white/10 backdrop-blur-xl rounded-3xl p-10 border border-white/20 text-center">
+              <Activity className="w-20 h-20 mx-auto text-purple-400 mb-4" />
+              <p className="text-7xl font-black text-purple-400">{totalTrades}</p>
+              <p className="text-xl text-gray-400 mt-2">TOTAL TRADES</p>
+            </div>
+          </div>
+
+          {/* Live Trade Log */}
+          <div className="mt-20">
+            <h3 className="text-6xl font-black text-center mb-10 bg-gradient-to-r from-cyan-400 to-purple-400 bg-clip-text text-transparent">
+              LIVE TRADE LOG
+            </h3>
+            <div className="bg-white/5 backdrop-blur-xl rounded-3xl border border-white/20 p-10 max-h-96 overflow-y-auto">
+              {(!data.tradeLog || data.tradeLog.length === 0) ? (
+                <p className="text-center text-4xl text-gray-500 py-32">Waiting for 7.5%+ runners...</p>
+              ) : (
+                <div className="space-y-6">
+                  {data.tradeLog.slice().reverse().map((t: any) => (
+                    <div key={t.id} className={`p-8 rounded-3xl border-4 ${t.type === "ENTRY" ? "bg-green-900/60 border-green-500" : "bg-red-900/60 border-red-500"}`}>
+                      <div className="flex justify-between items-center">
+                        <div>
+                          <span className="text-5xl font-black">{t.symbol}</span>
+                          <span className={`ml-8 text-3xl font-bold ${t.type === "ENTRY" ? "text-green-300" : "text-red-300"}`}>
+                            {t.type === "ENTRY" ? "BUY" : "SELL"} {t.qty} @ ${t.price}
+                          </span>
+                        </div>
+                        <div className="text-right">
+                          {t.pnl !== undefined && (
+                            <p className={`text-4xl font-black ${t.pnl >= 0 ? "text-green-400" : "text-red-400"}`}>
+                              {t.pnl >= 0 ? "+" : ""}{t.pnl} ({t.pnlPct}%)
+                            </p>
+                          )}
+                          <p className="text-xl text-gray-400 mt-3">
+                            {new Date(t.timestamp).toLocaleTimeString()} • {t.reason}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* FORCE SCAN BUTTON */}
+          <div className="text-center mt-20">
+            <button
+            onClick={triggerScan}
+            disabled={scanning}
+            className="px-40 py-20 text-7xl font-black rounded-full bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 shadow-2xl disabled:opacity-60 transition-all"
+          >
+            {scanning ? (
+              <>SCANNING <RefreshCw className="inline ml-12 w-20 h-20 animate-spin" /></>
+            ) : (
+              <>FORCE SCAN <Rocket className="inline ml-12 w-20 h-20" /></>
+            )}
+          </button>
+          </div>
+        </div>
+      </main>
+
+      {/* POSITIONS MODAL — 100% FIXED */}
+      {showPositions && data.positions && (
+        <div className="fixed inset-0 bg-black/95 backdrop-blur-xl z-50 flex items-center justify-center p-6">
+          <div className="bg-gray-900/95 border border-white/20 rounded-3xl p-12 max-w-5xl w-full max-h-screen overflow-y-auto">
+            <div className="flex justify-between items-center mb-10">
+              <h3 className="text-6xl font-black text-purple-400">ACTIVE POSITIONS</h3>
+              <button onClick={() => setShowPositions(false)}>
+                <X className="w-14 h-14 text-gray-400 hover:text-white" />
+              </button>
+            </div>
+
+            {data.positions.length === 0 ? (
+              <p className="text-center text-4xl text-gray-400 py-32">No open positions</p>
+            ) : (
+              <div className="space-y-8">
+                {data.positions.map((p: any, i: number) => (
+                  <div key={i} className="bg-white/5 rounded-3xl p-10 border border-white/10">
+                    <div className="grid grid-cols-2 md:grid-cols-5 gap-8 text-2xl">
+                      <div><span className="text-gray-400">Symbol</span><p className="text-5xl font-bold text-purple-400">{p.symbol}</p></div>
+                      <div><span className="text-gray-400">Qty</span><p className="text-5xl font-bold">{p.qty}</p></div>
+                      <div><span className="text-gray-400">Entry</span><p className="text-4xl">${p.entry?.toFixed(2)}</p></div>
+                      <div><span className="text-gray-400">Current</span><p className={`text-4xl font-bold ${p.unrealized_pl >= 0 ? 'text-green-400' : 'text-red-400'}`}>${p.current?.toFixed(2)}</p></div>
+                      <div><span className="text-gray-400">P&L</span><p className={`text-5xl font-black ${p.unrealized_pl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                        ${p.unrealized_pl?.toFixed(2)}
+                      </p></div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
-
-// ==================== ORDER EXECUTION ====================
-async function placeOrder(symbol, qty, side = "buy") {
-  if (DRY) {
-    logTrade("ENTRY", symbol, qty, "market", "DRY MODE");
-    return;
-  }
-
-  try {
-    const res = await axios.post(`${A_BASE}/orders`, {
-      symbol,
-      qty,
-      side,
-      type: "market",
-      time_in_force: "day"
-    }, { headers: HEADERS, timeout: 10000 });
-
-    const filledPrice = res.data.filled_avg_price || "market";
-    logTrade("ENTRY", symbol, qty, filledPrice, "Massive Momentum Signal");
-    return res.data;
-  } catch (err) {
-    console.log("Order failed:", err?.response?.data?.message || err.message);
-  }
-}
-
-async function closePosition(symbol) {
-  if (DRY) {
-    const pos = positions.find(p => p.symbol === symbol);
-    if (pos) logTrade("EXIT", symbol, pos.qty, pos.current || pos.entry, "DRY MODE");
-    return;
-  }
-
-  try {
-    await axios.delete(`${A_BASE}/positions/${symbol}`, { headers: HEADERS });
-    const pos = positions.find(p => p.symbol === symbol);
-    if (pos) logTrade("EXIT", symbol, pos.qty, pos.current, "Trailing Stop / TP");
-  } catch (err) {
-    console.log("Close failed:", err?.response?.data?.message || err.message);
-  }
-}
-
-// ==================== EQUITY & POSITIONS ====================
-async function updateEquityAndPositions() {
-  if (!ALPACA_KEY || !ALPACA_SECRET) return;
-
-  try {
-    const [accountRes, positionsRes] = await Promise.all([
-      axios.get(`${A_BASE}/account`, { headers: HEADERS, timeout: 12000 }),
-      axios.get(`${A_BASE}/positions`, { headers: HEADERS, timeout: 12000 })
-    ]);
-
-    accountEquity = parseFloat(accountRes.data.equity || 100000);
-    positions = positionsRes.data.map(p => ({
-      symbol: p.symbol,
-      qty: Number(p.qty),
-      entry: parseFloat(p.avg_entry_price),
-      current: parseFloat(p.current_price),
-      market_value: parseFloat(p.market_value),
-      unrealized_pl: parseFloat(p.unrealized_pl),
-      unrealized_plpc: parseFloat(p.unrealized_plpc) * 100
-    }));
-  } catch (err) {
-    console.error("Alpaca fetch error:", err.message);
-  }
-}
-
-// ==================== MASSIVE.COM GAINERS — FIXED ENDPOINT + BEARER AUTH ====================
-async function getMassiveGainers() {
-  if (!MASSIVE_KEY) {
-    console.log("MASSIVE_KEY not set → skipping scan");
-    return [];
-  }
-
-  try {
-    const res = await axios.get("https://api.massive.com/v2/snapshot/locale/us/markets/stocks/gainers", {
-      headers: {
-        "Authorization": `Bearer ${MASSIVE_KEY}`,  // ← FIXED: Bearer auth (not X-API-Key)
-        "Accept": "application/json"
-      },
-      timeout: 10000
-    });
-
-    const gainers = res.data?.tickers || [];
-    console.log(`Massive returned ${gainers.length} gainers`);
-
-    return gainers
-      .filter(t =>
-        t.todaysChangePerc >= 7.5 &&
-        t.volume >= 800000 &&
-        t.price >= 8 &&
-        t.price <= 350 &&
-        !positions.some(p => p.symbol === t.symbol)
-      )
-      .slice(0, 4)
-      .map(t => ({
-        symbol: t.symbol,
-        price: t.price
-      }));
-  } catch (err) {
-    console.log("Massive API error:", err.response?.status, err.response?.data?.message || err.message);
-    return [];
-  }
-}
-
-// ==================== TRADING LOOP ====================
-async function tradingLoop() {
-  await updateEquityAndPositions();
-
-  if (positions.length >= 5) return;
-
-  const signals = await getMassiveGainers();
-  for (const s of signals) {
-    if (positions.length >= 5) break;
-    const qty = Math.max(1, Math.floor(accountEquity * 0.02 / s.price));
-    await placeOrder(s.symbol, qty);
-  }
-}
-
-// ==================== DASHBOARD ENDPOINT ====================
-app.get("/", async (req, res) => {
-  await updateEquityAndPositions();
-  const totalPnL = positions.reduce((sum, p) => sum + p.unrealized_pl, 0);
-  const winRate = backtestResults.trades > 0
-    ? ((backtestResults.wins / backtestResults.trades) * 100).toFixed(1)
-    : "0.0";
-
-  res.json({
-    bot: "AlphaStream v39.0 — Massive.com Live",
-    version: "v39.0",
-    status: "ONLINE",
-    mode: DRY ? "DRY" : "LIVE",
-    dry_mode: DRY,
-    positions_count: positions.length,
-    max_pos: 5,
-    equity: `$${accountEquity.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
-    dailyPnL: totalPnL >= 0 ? `+$${totalPnL.toFixed(2)}` : `-$${Math.abs(totalPnL).toFixed(2)}`,
-    positions,
-    tradeLog: tradeLog.slice(-30),
-    backtest: {
-      totalTrades: backtestResults.trades,
-      winRate: `${winRate}%`,
-      totalPnL: backtestResults.totalPnL.toFixed(2),
-      wins: backtestResults.wins,
-      losses: backtestResults.losses
-    },
-    timestamp: new Date().toISOString()
-  });
-});
-
-app.get("/healthz", (req, res) => res.send("OK"));
-app.post("/manual/scan", async (req, res) => {
-  await tradingLoop();
-  res.json({ ok: true });
-});
-
-const PORT_NUM = parseInt(PORT, 10);
-app.listen(PORT_NUM, "0.0.0.0", () => {
-  console.log(`\nALPHASTREAM v39.0 LIVE ON PORT ${PORT_NUM}`);
-  console.log(`Dashboard → https://alphastream-dashboard.vercel.app\n`);
-  setInterval(tradingLoop, 60000);
-  tradingLoop();
-});
