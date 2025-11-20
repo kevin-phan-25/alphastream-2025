@@ -1,7 +1,8 @@
-// index.js — AlphaStream v73.0 — FMP STABLE API (No Legacy 403) + Full Features
+// index.js — AlphaStream v75.0 — YAHOO SCRAPER (Unlimited Free Gainers + Features)
 import express from "express";
 import cors from "cors";
 import axios from "axios";
+import * as cheerio from "cheerio";
 
 const app = express();
 app.use(cors());
@@ -10,7 +11,6 @@ app.use(express.json());
 const {
   ALPACA_KEY = "",
   ALPACA_SECRET = "",
-  FMP_KEY = "",
   DRY_MODE = "true",
   PORT = "8080"
 } = process.env;
@@ -28,11 +28,9 @@ let positions = [];
 let tradeLog = [];
 let lastGainers = [];
 let lastScanTime = 0;
-let fmpCallsToday = 0;
-const MAX_FMP_CALLS = 250;
 
-console.log(`\nALPHASTREAM v73.0 — FMP STABLE API`);
-console.log(`Mode → ${DRY ? "DRY" : "LIVE"} | FMP Calls: ${fmpCallsToday}/${MAX_FMP_CALLS}\n`);
+console.log(`\nALPHASTREAM v75.0 — YAHOO SCRAPER LIVE`);
+console.log(`Mode → ${DRY ? "DRY" : "LIVE"}\n`);
 
 function logTrade(type, symbol, qty, price, reason = "") {
   const trade = {
@@ -71,52 +69,43 @@ async function getTopGainers() {
   const now = Date.now();
   if (now - lastScanTime < 60000 && lastGainers.length > 0) return lastGainers;
 
-  if (!FMP_KEY || fmpCallsToday >= MAX_FMP_CALLS) {
-    console.log("FMP quota exhausted — using cache");
-    return lastGainers;
-  }
-
   try {
-    fmpCallsToday++;
-    const res = await axios.get(`https://financialmodelingprep.com/api/v4/stock_market/gainers?apikey=${FMP_KEY}`);  // ← STABLE v4 (no 403)
-    const candidates = (res.data || [])
-      .filter(t => {
-        const change = parseFloat(t.changesPercentage || "0");
-        const price = parseFloat(t.price || "0");
-        const volume = parseInt(t.volume || "0");
-        return change >= 7.5 && volume >= 800000 && price >= 8 && price <= 350;
-      })
-      .slice(0, 4);
-    lastGainers = candidates.map(t => ({ symbol: t.symbol, price: t.price }));
+    const res = await axios.get("https://finance.yahoo.com/gainers", {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+      },
+      timeout: 15000
+    });
+
+    const $ = cheerio.load(res.data);
+    const rows = $("table tbody tr").slice(0, 50).toArray();
+    const candidates = [];
+
+    for (const row of rows) {
+      const symbol = $(row).find('td[data-symbol]').attr('data-symbol') || $(row).find('td a').first().text().trim();
+      const changeStr = $(row).find('td[data-col="change"]').text().trim();
+      const priceStr = $(row).find('td[data-col="price"]').text().trim();
+      const volumeStr = $(row).find('td[data-col="volume"]').text().trim();
+
+      if (!symbol || !changeStr.includes('+')) continue;
+
+      const change = parseFloat(changeStr.replace('%', ''));
+      const price = parseFloat(priceStr);
+      const volume = parseInt(volumeStr.replace(/,/g, ''));
+
+      if (change >= 7.5 && volume >= 800000 && price >= 8 && price <= 350 && !positions.some(p => p.symbol === symbol)) {
+        candidates.push({ symbol, price });
+      }
+    }
+
+    lastGainers = candidates.slice(0, 4);
     lastScanTime = now;
-    console.log(`FMP STABLE v4 → ${lastGainers.length} runners: ${lastGainers.map(r => r.symbol).join(", ")}`);
+    console.log(`Yahoo Scraper → ${lastGainers.length} runners: ${lastGainers.map(r => r.symbol).join(", ")}`);
     return lastGainers;
-  } catch (e) {
-    console.log("FMP Stable failed → using cache", e.message);
-    return lastGainers;
-  }
-}
-
-async function isStrongMomentum(symbol) {
-  try {
-    const [quote, profile] = await Promise.all([
-      axios.get(`https://financialmodelingprep.com/api/v4/quote/${symbol}?apikey=${FMP_KEY}`),  // v4 Stable
-      axios.get(`https://financialmodelingprep.com/api/v4/profile/${symbol}?apikey=${FMP_KEY}`)   // v4 Stable
-    ]);
-
-    const q = quote.data[0];
-    const prof = profile.data[0];
-    const marketCap = prof?.mktCap || 0;
-    const avgVolume = prof?.volAvg || 1000000;
-
-    const volumeSurge = q.volume > avgVolume * 2;
-    const liquid = marketCap > 1_000_000_000;
-
-    return volumeSurge && liquid;
 
   } catch (e) {
-    console.log(`Filter failed for ${symbol}:`, e.message);
-    return true; // Default pass
+    console.log("Yahoo scraper failed:", e.message);
+    return lastGainers;
   }
 }
 
@@ -133,7 +122,7 @@ async function placeOrder(symbol, qty) {
     const res = await axios.post(`${A_BASE}/orders`, {
       symbol, qty, side: "buy", type: "market", time_in_force: "day"
     }, { headers: HEADERS });
-    logTrade("ENTRY", symbol, qty, res.data.filled_avg_price || "market", "FMP Gainer");
+    logTrade("ENTRY", symbol, qty, res.data.filled_avg_price || "market", "Yahoo Gainer");
     await updateEquityAndPositions();
   } catch (e) {
     console.log("Order failed:", e.response?.data?.message || e.message);
@@ -149,9 +138,6 @@ async function scanAndTrade() {
     if (positions.length >= 5) break;
     if (positions.some(p => p.symbol === c.symbol)) continue;
 
-    const pass = await isStrongMomentum(c.symbol);
-    if (!pass) continue;
-
     const qty = Math.max(1, Math.floor((accountEquity * 0.02) / c.price));
     await placeOrder(c.symbol, qty);
     await new Promise(r => setTimeout(r, 4000));
@@ -162,11 +148,11 @@ async function scanAndTrade() {
 app.get("/", async (req, res) => {
   await updateEquityAndPositions();
   const unrealized = positions.reduce((a, p) => a + (p.unrealized_pl || 0), 0);
-  const wins = tradeLog.filter(t => t.type === "ENTRY" && t.reason.includes("FMP")).length; // placeholder
+  const wins = tradeLog.filter(t => t.type === "ENTRY" && t.reason.includes("Yahoo")).length; // placeholder
 
   res.json({
-    bot: "AlphaStream v73.0",
-    version: "v73.0",
+    bot: "AlphaStream v75.0",
+    version: "v75.0",
     status: "ONLINE",
     mode: DRY ? "DRY" : "LIVE",
     dry_mode: DRY,
@@ -194,7 +180,7 @@ app.post("/scan", async (req, res) => {
 app.get("/healthz", (req, res) => res.send("OK"));
 
 app.listen(Number(PORT), "0.0.0.0", () => {
-  console.log(`\nALPHASTREAM v73.0 LIVE`);
+  console.log(`\nALPHASTREAM v75.0 LIVE`);
   setInterval(scanAndTrade, 300000); // 5 mins
   scanAndTrade();
 });
