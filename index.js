@@ -1,4 +1,4 @@
-// index.js — AlphaStream v42.0 — TOP MARKET MOVERS SCANNER (FREE TIER)
+// index.js — AlphaStream v44.0 — FULL MASSIVE.COM API LEVERAGE + AUTOMATED
 import express from "express";
 import cors from "cors";
 import axios from "axios";
@@ -26,7 +26,13 @@ const HEADERS = {
   "APCA-API-SECRET-KEY": ALPACA_SECRET
 };
 
-console.log(`\nALPHASTREAM v42.0 — TOP MARKET MOVERS`);
+// Massive.com Auth Headers
+const MASSIVE_HEADERS = {
+  "Authorization": `Bearer ${MASSIVE_KEY}`,
+  "Accept": "application/json"
+};
+
+console.log(`\nALPHASTREAM v44.0 — FULL MASSIVE.COM API`);
 console.log(`Mode → ${DRY ? "DRY (Paper)" : "LIVE (Real Money)"}\n`);
 
 // ==================== STATE ====================
@@ -85,7 +91,7 @@ async function placeOrder(symbol, qty, side = "buy") {
     }, { headers: HEADERS, timeout: 10000 });
 
     const filledPrice = res.data.filled_avg_price || "market";
-    logTrade("ENTRY", symbol, qty, filledPrice, "Massive Top Mover Signal");
+    logTrade("ENTRY", symbol, qty, filledPrice, "Massive Momentum Signal");
     return res.data;
   } catch (err) {
     console.log("Order failed:", err?.response?.data?.message || err.message);
@@ -133,7 +139,7 @@ async function updateEquityAndPositions() {
   }
 }
 
-// ==================== MASSIVE.COM TOP MARKET MOVERS — FIXED FOR FREE TIER ====================
+// ==================== MASSIVE.COM TOP MARKET MOVERS — FIXED (NOV 2025 FREE TIER) ====================
 async function getMassiveGainers() {
   if (!MASSIVE_KEY) {
     console.log("MASSIVE_KEY not set → skipping scan");
@@ -143,7 +149,7 @@ async function getMassiveGainers() {
   try {
     const res = await axios.get("https://api.massive.com/v2/snapshot/locale/us/markets/stocks/gainers", {
       headers: {
-        "Authorization": `Bearer ${MASSIVE_KEY}`,  // ← FIXED: Bearer auth (works on free tier)
+        "Authorization": `Bearer ${MASSIVE_KEY}`,  // ← FIXED: Bearer auth (free tier OK)
         "Accept": "application/json"
       },
       timeout: 10000
