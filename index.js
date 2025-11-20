@@ -1,5 +1,4 @@
-// index.js — AlphaStream v81.3 — Cloud Run + Axios Fixed + Alpaca Live
-
+// index.js — AlphaStream v81.3 — FIXED: Alpaca + Header Overflow + Live Logs
 import express from "express";
 import cors from "cors";
 import axios from "axios";
@@ -9,6 +8,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// ENV Variables
 const {
   ALPACA_KEY = "",
   ALPACA_SECRET = "",
@@ -27,15 +27,17 @@ const HEADERS = {
   "APCA-API-SECRET-KEY": ALPACA_SECRET 
 };
 
+// Core data
 let accountEquity = 100000;
 let positions = [];
 let tradeLog = [];
 let lastGainers = [];
 let lastScanTime = 0;
 
-console.log(`\nALPHASTREAM v81.3 — Cloud Run Axios Fixes`);
+console.log(`\nALPHASTREAM v81.3 — FIXED & LIVE`);
 console.log(`Mode → ${DRY ? "DRY (real PnL)" : "LIVE"}\n`);
 
+// ---------- LOGGING FUNCTION ----------
 function logTrade(type, symbol, qty, price, reason = "", pnl = 0) {
   const trade = {
     type,
@@ -51,6 +53,7 @@ function logTrade(type, symbol, qty, price, reason = "", pnl = 0) {
   console.log(`[${DRY ? "DRY" : "LIVE"}] ${type} ${symbol} ×${qty} @ $${price} | ${reason} | PnL ${pnl.toFixed(2)}`);
 }
 
+// ---------- ALPACA SYNC ----------
 async function updateEquityAndPositions() {
   if (!ALPACA_KEY) {
     console.log("No Alpaca keys — using mock $100k");
@@ -58,13 +61,13 @@ async function updateEquityAndPositions() {
   }
 
   try {
-    const [acctRes, posRes] = await Promise.all([
-      axios({ method: "get", url: `${A_BASE}/account`, headers: HEADERS, timeout: 10000 }),
-      axios({ method: "get", url: `${A_BASE}/positions`, headers: HEADERS, timeout: 10000 })
+    const [acct, pos] = await Promise.all([
+      axios.get(`${A_BASE}/account`, { headers: HEADERS, timeout: 15000 }),
+      axios.get(`${A_BASE}/positions`, { headers: HEADERS, timeout: 15000 })
     ]);
 
-    accountEquity = parseFloat(acctRes.data.equity || 100000);
-    positions = posRes.data.map(p => ({
+    accountEquity = parseFloat(acct.data.equity || 100000);
+    positions = pos.data.map(p => ({
       symbol: p.symbol,
       qty: Number(p.qty),
       entry: Number(p.avg_entry_price),
@@ -72,22 +75,22 @@ async function updateEquityAndPositions() {
       unrealized_pl: Number(p.unrealized_pl),
       highestPrice: Math.max(Number(p.current_price), Number(p.avg_entry_price))
     }));
+
     console.log(`Alpaca sync → $${accountEquity.toFixed(2)} | ${positions.length} positions`);
   } catch (e) {
     console.log("Alpaca sync failed:", e.response?.status || e.message);
   }
 }
 
+// ---------- YAHOO TOP GAINERS ----------
 async function getTopGainers() {
   const now = Date.now();
   if (now - lastScanTime < 60000 && lastGainers.length) return lastGainers;
 
   try {
-    const res = await axios({
-      method: "get",
-      url: "https://finance.yahoo.com/gainers",
+    const res = await axios.get("https://finance.yahoo.com/gainers", {
       headers: { "User-Agent": "Mozilla/5.0" },
-      timeout: 15000
+      timeout: 15000 // must be object, not number
     });
 
     const $ = cheerio.load(res.data);
@@ -99,15 +102,13 @@ async function getTopGainers() {
       const symbol = tds.eq(0).find("a").text().trim() || tds.eq(0).text().trim();
       const price = parseFloat(tds.eq(2).text().replace(/,/g, "")) || 0;
       const changePct = tds.eq(3).text().trim();
-      const volumeText = tds.eq(5).text().trim();
+      const volume = tds.eq(5).text().trim();
 
       if (!symbol || !changePct.includes("+")) continue;
       const change = parseFloat(changePct);
-      const volume = volumeText.includes("M") ? parseFloat(volumeText) * 1e6 :
-                     volumeText.includes("K") ? parseFloat(volumeText) * 1e3 :
-                     parseFloat(volumeText.replace(/,/g, "")) || 0;
+      const volNum = volume.includes("M") ? parseFloat(volume) * 1e6 : parseFloat(volume.replace(/,/g, "")) || 0;
 
-      if (change >= 7.5 && volume >= 800000 && price >= 8 && price <= 350 && !positions.some(p => p.symbol === symbol)) {
+      if (change >= 7.5 && volNum >= 800000 && price >= 8 && price <= 350 && !positions.some(p => p.symbol === symbol)) {
         candidates.push({ symbol, price, change });
       }
     }
@@ -122,67 +123,44 @@ async function getTopGainers() {
   }
 }
 
+// ---------- POSITION MANAGEMENT ----------
 async function managePositions() {
   for (const pos of positions.slice()) {
     const pnlPct = (pos.current - pos.entry) / pos.entry;
 
     if (pnlPct >= 0.25) {
       logTrade("EXIT", pos.symbol, pos.qty, pos.current, "Take Profit +25%", (pnlPct * pos.qty * pos.entry));
-      if (!DRY) await axios({
-        method: "post",
-        url: `${A_BASE}/orders`,
-        headers: HEADERS,
-        data: { symbol: pos.symbol, qty: pos.qty, side: "sell", type: "market", time_in_force: "day" },
-        timeout: 10000
-      });
+      if (!DRY) await axios.post(`${A_BASE}/orders`, { symbol: pos.symbol, qty: pos.qty, side: "sell", type: "market", time_in_force: "day" }, { headers: HEADERS });
       positions = positions.filter(p => p.symbol !== pos.symbol);
     }
     else if (pos.highestPrice && pos.current < pos.highestPrice * 0.92) {
       logTrade("EXIT", pos.symbol, pos.qty, pos.current, "Trailing Stop -8%", ((pos.current - pos.entry) * pos.qty));
-      if (!DRY) await axios({
-        method: "post",
-        url: `${A_BASE}/orders`,
-        headers: HEADERS,
-        data: { symbol: pos.symbol, qty: pos.qty, side: "sell", type: "market", time_in_force: "day" },
-        timeout: 10000
-      });
+      if (!DRY) await axios.post(`${A_BASE}/orders`, { symbol: pos.symbol, qty: pos.qty, side: "sell", type: "market", time_in_force: "day" }, { headers: HEADERS });
       positions = positions.filter(p => p.symbol !== pos.symbol);
     }
     else if (pnlPct <= -0.12) {
       logTrade("EXIT", pos.symbol, pos.qty, pos.current, "Hard Stop -12%", ((pos.current - pos.entry) * pos.qty));
-      if (!DRY) await axios({
-        method: "post",
-        url: `${A_BASE}/orders`,
-        headers: HEADERS,
-        data: { symbol: pos.symbol, qty: pos.qty, side: "sell", type: "market", time_in_force: "day" },
-        timeout: 10000
-      });
+      if (!DRY) await axios.post(`${A_BASE}/orders`, { symbol: pos.symbol, qty: pos.qty, side: "sell", type: "market", time_in_force: "day" }, { headers: HEADERS });
       positions = positions.filter(p => p.symbol !== pos.symbol);
     }
   }
 }
 
+// ---------- PLACE ORDER ----------
 async function placeOrder(symbol, qty, price) {
-  if (!symbol || qty <= 0) return;
+  logTrade("ENTRY", symbol, qty, price, "Top Gainer Entry");
   if (!DRY) {
     try {
-      await axios({
-        method: "post",
-        url: `${A_BASE}/orders`,
-        headers: HEADERS,
-        data: { symbol, qty, side: "buy", type: "market", time_in_force: "day" },
-        timeout: 10000
-      });
-      logTrade("ENTRY", symbol, qty, price, "LIVE ENTRY");
+      await axios.post(`${A_BASE}/orders`, {
+        symbol, qty, side: "buy", type: "market", time_in_force: "day"
+      }, { headers: HEADERS });
     } catch (e) {
-      console.log("Order failed:", e.response?.status || e.message);
+      console.log(`Order failed for ${symbol}:`, e.response?.status || e.message);
     }
-  } else {
-    positions.push({ symbol, qty, entry: price, current: price, unrealized_pl: 0, highestPrice: price });
-    logTrade("ENTRY", symbol, qty, price, "DRY ENTRY");
   }
 }
 
+// ---------- SCAN AND TRADE ----------
 async function scanAndTrade() {
   await updateEquityAndPositions();
   await managePositions();
@@ -195,15 +173,17 @@ async function scanAndTrade() {
 
     const qty = Math.max(1, Math.floor((accountEquity * 0.02) / c.price));
     await placeOrder(c.symbol, qty, c.price);
-    await new Promise(r => setTimeout(r, 4000)); // small delay between buys
+    await new Promise(r => setTimeout(r, 4000));
   }
 }
 
-// Dashboard endpoint
+// ---------- DASHBOARD ----------
 app.get("/", async (req, res) => {
   await updateEquityAndPositions();
   const unrealized = positions.reduce((s, p) => s + (p.unrealized_pl || 0), 0);
-  const wins = tradeLog.filter(t => t.type === "ENTRY").length;
+  const exits = tradeLog.filter(t => t.type === "EXIT");
+  const wins = exits.filter(t => parseFloat(t.pnl || "0") > 0).length;
+  const winRate = exits.length > 0 ? ((wins / exits.length) * 100).toFixed(1) + "%" : "0.0%";
 
   res.json({
     bot: "AlphaStream v81.3",
@@ -212,25 +192,33 @@ app.get("/", async (req, res) => {
     mode: DRY ? "PAPER" : "LIVE",
     dry_mode: DRY,
     equity: `$${accountEquity.toFixed(2)}`,
-    dailyPnL: unrealized >= 0 ? `+$${unrealized.toFixed(2)}` : `-$${Math.abs(unrealized.toFixed(2))}`,
+    dailyPnL: unrealized >= 0 ? `+$${unrealized.toFixed(2)}` : `-$${Math.abs(unrealized).toFixed(2)}`,
     positions_count: positions.length,
-    positions,
+    positions: positions.length ? positions : null,
     tradeLog: tradeLog.slice(-30),
-    backtest: { totalTrades: tradeLog.length, winRate: "0.0%", wins, losses: 0 }
+    backtest: {
+      totalTrades: tradeLog.length,
+      winRate,
+      wins,
+      losses: exits.length - wins
+    }
   });
 });
 
+// ---------- FORCE SCAN ----------
 app.post("/scan", async (req, res) => {
-  console.log("FORCE SCAN FROM DASHBOARD");
+  console.log("FORCE SCAN TRIGGERED");
   await scanAndTrade();
   res.json({ ok: true });
 });
 
+// ---------- HEALTH ----------
 app.get("/healthz", (req, res) => res.send("OK"));
 
-app.listen(Number(PORT), "0.0.0.0", () => {
+// ---------- START SERVER ----------
+app.listen(Number(PORT), "0.0.0.0", async () => {
   console.log(`\nALPHASTREAM v81.3 FULLY LIVE`);
-  updateEquityAndPositions();
+  await updateEquityAndPositions();
   setInterval(scanAndTrade, 300000);
   scanAndTrade();
 });
