@@ -1,4 +1,4 @@
-// index.js — AlphaStream v97.0 — REAL ALPACA SYNC + BACKTEST BUTTON (Nov 2025)
+// index.js — AlphaStream v97.1 — REAL ALPACA SYNC + BACKTEST BUTTON (Nov 2025)
 import express from "express";
 import cors from "cors";
 import axios from "axios";
@@ -28,7 +28,6 @@ let accountEquity = 100000;
 let positions = [];
 let lastRockets = [];
 let backtestResults = { trades: 0, winRate: 0, profitFactor: 0, maxDD: 0, totalPnL: 0, bestTrade: 0, worstTrade: 0 };
-
 const floatCache = new Map();
 
 // YAHOO FLOAT (NO KEY)
@@ -45,31 +44,26 @@ async function getFloatFromYahoo(symbol) {
   }
 }
 
-// REAL ALPACA SYNC — THIS WAS MISSING BEFORE
+// REAL ALPACA SYNC
 async function syncAlpacaAccount() {
   if (!ALPACA_KEY) return;
-
   try {
     const [acctRes, posRes] = await Promise.all([
       axios.get(`${BASE_URL}/account`, { headers: HEADERS, timeout: 15000 }),
       axios.get(`${BASE_URL}/positions`, { headers: HEADERS, timeout: 15000 }).catch(() => ({ data: [] }))
     ]);
-
     accountEquity = parseFloat(acctRes.data.equity || acctRes.data.cash || 100000);
-
-    // Sync live positions into our array
+    // Sync live positions
     const liveMap = {};
     posRes.data.forEach(p => liveMap[p.symbol] = {
       qty: parseInt(p.qty),
       current: parseFloat(p.current_price),
       cost: parseFloat(p.cost_basis)
     });
-
     positions = positions
       .map(p => liveMap[p.symbol] ? { ...p, ...liveMap[p.symbol] } : p)
       .filter(p => p.qty > 0);
-
-    // Add any new positions Alpaca positions we didn't know about
+    // Add new positions
     posRes.data.forEach(live => {
       if (!positions.find(p => p.symbol === live.symbol)) {
         positions.push({
@@ -81,7 +75,6 @@ async function syncAlpacaAccount() {
         });
       }
     });
-
   } catch (e) {
     console.log("Alpaca sync failed:", e.response?.data?.message || e.message);
   }
@@ -92,14 +85,11 @@ async function scrapeRockets() {
   const hourET = parseInt(new Date().toLocaleString("en-US", { timeZone: "America/New_York", hour: "2-digit", hour12: false }));
   const isPre = hourET >= 4 && hourET < 9;
 
- 9;
-
   try {
     const { data } = await axios.get("https://api.nasdaq.com/api/screener/stocks?tableonly=true&download=true", {
       timeout: 15000,
       headers: { "User-Agent": "Mozilla/5.0" }
     });
-
     const candidates = (data.data?.rows || [])
       .filter(r => r.symbol && r.lastsale && r.pctchange && !r.symbol.includes("^"))
       .map(r => ({
@@ -114,7 +104,7 @@ async function scrapeRockets() {
     for (const c of candidates.slice(0, 25)) {
       const fl = await getFloatFromYahoo(c.symbol);
       if (fl <= 40_000_000) rockets.push({ ...c, float: fl });
-      await new Promise(r => setTimeout(r, 180));
+      await new Promise(r => setTimeout(r, 180)); // rate limit Yahoo
     }
 
     return rockets
@@ -130,30 +120,25 @@ async function scrapeRockets() {
 // BACKTEST FROM trades.csv
 async function runBacktest() {
   if (!fs.existsSync("trades.csv")) return backtestResults;
-
   const lines = fs.readFileSync("trades.csv", "utf-8").split("\n").filter(Boolean);
   const pnls = [];
   let equity = 100000;
   let peak = equity;
   let maxDD = 0;
-
   for (let i = 0; i < lines.length - 1; i += 2) {
     if (i + 1 >= lines.length) break;
     const entry = lines[i].split(",");
     const exit = lines[i + 1].split(",");
     if (entry[1] !== "ENTRY" || exit[1] !== "EXIT") continue;
-
     const pnl = (parseFloat(exit[4]) - parseFloat(entry[4])) * parseInt(entry[3]);
     pnls.push(pnl);
     equity += pnl;
     peak = Math.max(peak, equity);
     maxDD = Math.min(maxDD, (equity - peak) / peak);
   }
-
   const wins = pnls.filter(p => p > 0);
   const grossProfit = wins.reduce((a, b) => a + b, 0);
   const grossLoss = Math.abs(pnls.filter(p => p < 0).reduce((a, b) => a + b, 0));
-
   backtestResults = {
     trades: pnls.length,
     winRate: pnls.length ? Math.round((wins.length / pnls.length) * 100) : 0,
@@ -167,13 +152,11 @@ async function runBacktest() {
 
 // POSITION MANAGEMENT + EXIT LOGIC
 async function managePositions() {
-  await syncAlpacaAccount(); // ← critical
-
+  await syncAlpacaAccount();
   for (const pos of positions) {
     const current = pos.current || pos.entry;
     const pnlPct = (current - pos.entry) / pos.entry * 100;
     const trail = (current - pos.peakPrice) / pos.peakPrice * 100;
-
     if (pnlPct >= 200 || trail <= -20) {
       if (!IS_PAPER && ALPACA_KEY) {
         await axios.post(`${BASE_URL}/orders`, {
@@ -195,21 +178,17 @@ async function scanAndTrade() {
   await managePositions();
   await runBacktest();
   const rockets = await scrapeRockets();
-
   for (const r of rockets) {
     if (positions.find(p => p.symbol === r.symbol)) continue;
     const qty = Math.max(1, Math.floor(accountEquity * 0.04 / r.price));
-
     if (!IS_PAPER && ALPACA_KEY) {
       await axios.post(`${BASE_URL}/orders`, {
         symbol: r.symbol, qty, side: "buy", type: "market", time_in_force: "opg"
       }, { headers: HEADERS }).catch(e => console.log("Order failed:", e.response?.data?.message));
     }
-
     positions.push({ symbol: r.symbol, qty, entry: r.price, current: r.price, peakPrice: r.price });
     fs.appendFileSync("trades.csv", `${new Date().toISOString()},ENTRY,${r.symbol},${qty},${r.price},${r.change.toFixed(1)}%,${(r.float/1e6).toFixed(1)}M\n`);
   }
-
   lastRockets = rockets.map(r => `${r.symbol}+${r.change.toFixed(1)}% (${(r.float/1e6).toFixed(1)}M)`);
 }
 
@@ -218,7 +197,7 @@ app.get("/", async (req, res) => {
   await scanAndTrade();
   const unreal = positions.reduce((s, p) => s + (p.current - p.entry) * p.qty, 0);
   res.json({
-    bot: "AlphaStream v97.0 — REAL ALPACA + BACKTEST",
+    bot: "AlphaStream v97.1 — REAL ALPACA + BACKTEST",
     mode: IS_PAPER ? "PAPER" : "LIVE",
     equity: `$${Number(accountEquity).toFixed(0)}`,
     unrealized: unreal > 0 ? `+$${unreal.toFixed(0)}` : `$${unreal.toFixed(0)}`,
@@ -239,7 +218,7 @@ app.post("/backtest", async (req, res) => {
 });
 
 app.listen(8080, "0.0.0.0", () => {
-  console.log("\nALPHASTREAM v97.0 — FULLY CONNECTED TO ALPACA + BACKTEST BUTTON READY");
+  console.log("\nALPHASTREAM v97.1 — FULLY CONNECTED TO ALPACA + BACKTEST BUTTON READY");
   syncAlpacaAccount().then(() => console.log("Alpaca connected — Equity:", accountEquity));
   setInterval(scanAndTrade, 180000);
   scanAndTrade();
