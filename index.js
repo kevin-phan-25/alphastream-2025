@@ -130,7 +130,7 @@ function detectELITEPatterns(bars) {
 
 // ==================== SCANNER ====================
 async function scrapeRockets() {
-  console.log("ELITE v98 — Scanning 7 Warrior Patterns...");
+  console.log("ELITE v98 — Scanning 7 ELITE Patterns...");
   try {
     const { data } = await axios.get("https://api.nasdaq.com/api/screener/stocks?tableonly=true&download=true", {
       timeout: 15000,
@@ -283,7 +283,7 @@ app.get("/performance", async (req, res) => {
 });
 
 app.listen(8080, "0.0.0.0", () => {
-  console.log("\nALPHASTREAM v98 ELITE — 7 WARRIOR PATTERNS — EQUITY CURVE LIVE");
+  console.log("\nALPHASTREAM v98 ELITE — 7 ELITE PATTERNS — EQUITY CURVE LIVE");
   syncAlpacaAccount();
   setInterval(scanAndTrade, 180000);
   scanAndTrade();
