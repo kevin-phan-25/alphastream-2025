@@ -1,4 +1,3 @@
-# .github/workflows/deploy.yml
 name: Deploy AlphaStream Autopilot
 
 on:
@@ -12,7 +11,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Authenticate to Google Cloud (using your existing key)
+      - name: Authenticate to Google Cloud (your SA key)
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
@@ -20,28 +19,21 @@ jobs:
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: Deploy to Cloud Run (PUPPETEER-READY)
+      - name: Deploy to Cloud Run (Puppeteer + Nuclear)
         run: |
           gcloud run deploy alphastream-autopilot \
             --source . \
             --region=us-east1 \
             --project=alphastream-2025 \
-            --platform=managed \
             --allow-unauthenticated \
+            --quiet \
             --port=8080 \
             --timeout=540 \
             --memory=2Gi \
             --cpu=2 \
             --max-instances=10 \
             --no-cpu-throttling \
-            --quiet \
             --set-env-vars=ALPACA_KEY=${{ secrets.ALPACA_KEY }} \
             --set-env-vars=ALPACA_SECRET=${{ secrets.ALPACA_SECRET }} \
             --set-env-vars=DRY_MODE=true \
             --set-env-vars=MAX_DAILY_LOSS=500
-
-      - name: SUCCESS — ALPHASTREAM v83.0 LIVE
-        run: |
-          echo "ALPHASTREAM v83.0 — PUPPETEER NUCLEAR ENGINE IS NOW LIVE"
-          echo "Yahoo Finance is being scraped with real Chromium"
-          echo "No more Header overflow. No more empty scans."
