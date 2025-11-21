@@ -103,7 +103,7 @@ async function loginTV(page, retries = 3) {
         const btn = Array.from(document.querySelectorAll("button, a")).find(el => /sign in|log in/i.test(el.textContent || ""));
         if (btn) btn.click();
       });
-      await page.waitForTimeout(5000);
+      await new Promise(r => setTimeout(r, 5000));
 
       await page.evaluate(() => {
         const overlays = document.querySelectorAll(".tv-cookie-banner, .tv-dialog, .tv-banner, .tv-modal");
@@ -121,13 +121,13 @@ async function loginTV(page, retries = 3) {
         page.click('button:has-text("Sign in"), button[type="submit"]'),
         page.waitForNavigation({ waitUntil: "networkidle2", timeout: 45000 }).catch(() => {})
       ]);
-      await page.waitForTimeout(5000);
+      await new Promise(r => setTimeout(r, 5000));
 
       if (await page.$("[data-name='header-user-menu-button']")) return true;
       console.log(`TV: LOGIN ATTEMPT ${i + 1} FAILED — RETRYING`);
     } catch (e) {
       console.log("Login attempt error:", e.message);
-      await page.waitForTimeout(3000);
+      await new Promise(r => setTimeout(r, 3000));
     }
   }
   console.log("TV: LOGIN FAILED AFTER RETRIES");
@@ -140,7 +140,7 @@ async function openExtended(page) {
     const btn = Array.from(document.querySelectorAll("button")).find(b => /extended|pre|post/i.test(b.textContent || "") || b.getAttribute("data-name")?.includes("extended"));
     if (btn) btn.click();
   });
-  await page.waitForTimeout(6000);
+  await new Promise(r => setTimeout(r, 6000));
 }
 
 // FINAL SCRAPER
