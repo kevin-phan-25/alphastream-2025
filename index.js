@@ -1,4 +1,4 @@
-// index.js — AlphaStream v98 ELITE EDITION — FINAL & PERFECT
+// index.js — AlphaStream v98 ELITE EDITION — FINAL & GOD-TIER
 import express from "express";
 import cors from "cors";
 import axios from "axios";
@@ -17,7 +17,6 @@ const {
 const IS_PAPER = PAPER === "true" || !ALPACA_KEY;
 const BASE_URL = IS_PAPER ? "https://paper-api.alpaca.markets/v2" : "https://api.alpaca.markets/v2";
 const DATA_URL = "https://data.alpaca.markets";
-
 const HEADERS = {
   "APCA-API-KEY-ID": ALPACA_KEY.trim(),
   "APCA-API-SECRET-KEY": ALPACA_SECRET.trim()
@@ -26,8 +25,10 @@ const HEADERS = {
 let accountEquity = 100000;
 let positions = [];
 let lastRockets = [];
-let backtestResults = { trades: 0, winRate: 0, profitFactor: 0, maxDD: 0, totalPnL: 0, bestTrade: 0, worstTrade: 0 };
 const floatCache = new Map();
+
+// EQUITY CURVE HISTORY — AUTO-TRACKED EVERY SYNC
+let equityHistory = [];
 
 // ==================== UTILS ====================
 async function getFloatFromYahoo(symbol) {
@@ -48,14 +49,30 @@ async function syncAlpacaAccount() {
       axios.get(`${BASE_URL}/account`, { headers: HEADERS, timeout: 10000 }),
       axios.get(`${BASE_URL}/positions`, { headers: HEADERS, timeout: 10000 }).catch(() => ({ data: [] }))
     ]);
-    accountEquity = parseFloat(acct.data.equity || acct.data.cash || 100000);
-    positions = pos.data.filter(p => parseInt(p.qty) > 0).map(p => ({
-      symbol: p.symbol,
-      qty: parseInt(p.qty),
-      entry: parseFloat(p.avg_entry_price),
-      current: parseFloat(p.current_price),
-      peakPrice: parseFloat(p.current_price)
-    }));
+
+    const newEquity = parseFloat(acct.data.equity || acct.data.cash || 100000);
+    
+    // ONLY PUSH IF EQUITY CHANGED (avoids spam)
+    if (Math.abs(newEquity - accountEquity) > 5 || equityHistory.length === 0) {
+      accountEquity = newEquity;
+      equityHistory.push({
+        time: new Date().toISOString(),
+        equity: parseFloat(newEquity.toFixed(2))
+      });
+      // Keep last 1000 points max
+      if (equityHistory.length > 1000) equityHistory.shift();
+    }
+
+    positions = pos.data
+      .filter(p => parseInt(p.qty) > 0)
+      .map(p => ({
+        symbol: p.symbol,
+        qty: parseInt(p.qty),
+        entry: parseFloat(p.avg_entry_price),
+        current: parseFloat(p.current_price),
+        peakPrice: parseFloat(p.current_price)
+      }));
+
   } catch (e) {
     console.log("Alpaca sync error:", e.message);
   }
@@ -70,12 +87,10 @@ async function fetch1minBars(symbol) {
     const url = `${DATA_URL}/v2/stocks/${symbol}/bars?timeframe=1Min&start=${start.toISOString()}&end=${end.toISOString()}&limit=500`;
     const { data } = await axios.get(url, { headers: HEADERS, timeout: 12000 });
     return data.bars || [];
-  } catch (e) {
-    return [];
-  }
+  } catch { return []; }
 }
 
-// ==================== 7 ELITE PATTERNS — PERFECTED ====================
+// ==================== 7 ELITE PATTERNS ====================
 function detectELITEPatterns(bars) {
   if (bars.length < 40) return null;
   const recent = bars.slice(-40);
@@ -83,47 +98,39 @@ function detectELITEPatterns(bars) {
   const h = recent.map(b => b.h);
   const l = recent.map(b => b.l);
   const v = recent.map(b => b.v);
-
   const totalVol = v.reduce((a, b) => a + b, 0);
   const vwap = totalVol === 0 ? c[c.length-1] : recent.reduce((s, b) => s + b.c * b.v, 0) / totalVol;
   const last = c[c.length-1];
 
-  // 1. Bull Flag
   if (c[10] < c[20] * 1.4 && c[30] < c[20] * 0.95 &&
       v.slice(-10).reduce((a,b)=>a+b,0) < v.slice(-30,-20).reduce((a,b)=>a+b,0) * 0.6 &&
       last > c[c.length-3]) return "bull_flag";
 
-  // 2. Flat Top Breakout
   const resistance = Math.max(...h.slice(-18,-4));
   if (h.slice(-4).every(hh => hh <= resistance * 1.02) &&
       last > resistance * 1.01 && v[v.length-1] > v[v.length-2] * 2) return "flat_top";
 
-  // 3. Micro Pullback
   if (c[15] < last * 1.3 && Math.min(...l.slice(-20)) > c[20] * 0.88 && last > Math.max(...c.slice(-20)) * 0.99)
     return "micro_pullback";
 
-  // 4. Red-to-Green
   const openPrice = c.find(p => p > 0) || last;
   if (Math.min(...l) < openPrice * 0.98 && last > openPrice * 1.02) return "red_to_green";
 
-  // 5. VWAP Reclaim
   if (l.slice(-12).some(ll => ll < vwap * 0.99) && last > vwap * 1.005 && v[v.length-1] > v[v.length-2] * 1.5)
     return "vwap_reclaim";
 
-  // 6. Inside Bar Breakout
   if (h[h.length-2] < h[h.length-3] && l[l.length-2] > l[l.length-3] && last > h[h.length-3] * 1.005)
     return "inside_bar";
 
-  // 7. ABCD
   const a = c[10], b = c[22], cdTarget = b + (b - a);
   if (b > a * 1.4 && c[30] < b * 0.92 && last > cdTarget * 0.98) return "abcd";
 
   return null;
 }
 
-// ==================== NASDAQ SCANNER + ELITE FILTER ====================
+// ==================== SCANNER ====================
 async function scrapeRockets() {
-  console.log("ELITE EDITION v98 — Scanning with 7 patterns...");
+  console.log("ELITE v98 — Scanning 7 Warrior Patterns...");
   try {
     const { data } = await axios.get("https://api.nasdaq.com/api/screener/stocks?tableonly=true&download=true", {
       timeout: 15000,
@@ -144,13 +151,11 @@ async function scrapeRockets() {
     for (const c of candidates.slice(0, 18)) {
       const fl = await getFloatFromYahoo(c.symbol);
       if (fl > 40_000_000) continue;
-
       const bars = await fetch1minBars(c.symbol);
       const pattern = detectELITEPatterns(bars);
-
       if (pattern) {
         rockets.push({ ...c, float: fl, pattern });
-        console.log(`ELITE ROCKET → ${c.symbol} +${c.change.toFixed(1)}% (${(fl/1e6).toFixed(1)}M) → ${pattern.toUpperCase()}`);
+        console.log(`ROCKET → ${c.symbol} +${c.change.toFixed(1)}% (${(fl/1e6).toFixed(1)}M float) [${pattern.toUpperCase()}]`);
       }
       await new Promise(r => setTimeout(r, 280));
     }
@@ -184,7 +189,6 @@ async function managePositions() {
 async function scanAndTrade() {
   await managePositions();
   const rockets = await scrapeRockets();
-
   for (const r of rockets) {
     if (positions.find(p => p.symbol === r.symbol)) continue;
     const qty = Math.max(1, Math.floor(accountEquity * 0.05 / r.price));
@@ -196,7 +200,6 @@ async function scanAndTrade() {
     positions.push({ symbol: r.symbol, qty, entry: r.price, current: r.price, peakPrice: r.price });
     fs.appendFileSync("trades.csv", `${new Date().toISOString()},ENTRY,${r.symbol},${qty},${r.price},${r.change.toFixed(1)}%,${(r.float/1e6).toFixed(1)}M,${r.pattern}\n`);
   }
-
   lastRockets = rockets.map(r => `${r.symbol}+${r.change.toFixed(1)}% (${(r.float/1e6).toFixed(1)}M) [${r.pattern.toUpperCase()}]`);
 }
 
@@ -207,7 +210,7 @@ app.get("/", async (req, res) => {
   res.json({
     bot: "AlphaStream v98 — ELITE EDITION",
     mode: IS_PAPER ? "PAPER" : "LIVE",
-    equity: `$${Number(accountEquity).toFixed(0)}`,
+    equity: `$${accountEquity.toFixed(0)}`,
     unrealized: unreal > 0 ? `+$${unreal.toFixed(0)}` : `$${unreal.toFixed(0)}`,
     positions: positions.length,
     rockets: lastRockets,
@@ -215,19 +218,21 @@ app.get("/", async (req, res) => {
   });
 });
 
-app.post("/scan", async (req, res) => { await scanAndTrade(); res.json({ ok: true }); });
-app.post("/backtest", async (req, res) => { /* your backtest code */ res.json({ backtest: backtestResults }); });
-
-app.listen(8080, "0.0.0.0", () => {
-  console.log("\nALPHASTREAM v98 — ELITE EDITION — 7 PATTERNS LIVE — SNIPING MODE");
-  syncAlpacaAccount();
-  setInterval(scanAndTrade, 180000);
-  scanAndTrade();
+app.post("/scan", async (req, res) => {
+  await scanAndTrade();
+  res.json({ ok: true });
 });
-// FINAL /trades ENDPOINT — LIVE WIN RATE + FULL STATS (add to your index.js)
-app.get("/trades", async (req, res) => {
+
+// FINAL PERFORMANCE ENDPOINT — EQUITY CURVE + STATS
+app.get("/performance", async (req, res) => {
+  await syncAlpacaAccount(); // ensure latest equity
+
   if (!fs.existsSync("trades.csv")) {
-    return res.json({ trades: [], stats: { trades: 0, wins: 0, losses: 0, winRate: "0.0", avgWin: "0.0", avgLoss: "0.0", netPnL: "0.0" }});
+    return res.json({
+      trades: [],
+      stats: { trades: 0, wins: 0, losses: 0, winRate: "0.0", avgWin: "+0.0%", avgLoss: "0.0%", netPnL: "0.0" },
+      equityCurve: equityHistory.length > 0 ? equityHistory : [{ time: new Date().toISOString(), equity: 100000 }]
+    });
   }
 
   const lines = fs.readFileSync("trades.csv", "utf-8").trim().split("\n").filter(Boolean);
@@ -247,10 +252,10 @@ app.get("/trades", async (req, res) => {
       const pnlPct = ((price - entry.entryPrice) / entry.entryPrice * 100).toFixed(2);
       trades.push({
         symbol,
-        pattern: entry.pattern.toUpperCase(),
+        pattern: pattern.toUpperCase(),
         pnlPct,
         result: parseFloat(pnlPct) >= 0 ? "WIN" : "LOSS",
-        time: cols[0].split("T")[0] + " " + cols[0].split("T")[1].split(".")[0]
+        time: new Date(cols[0]).toLocaleString()
       });
       entry = null;
     }
@@ -263,7 +268,7 @@ app.get("/trades", async (req, res) => {
   const avgLoss = losses.length ? (losses.reduce((s, t) => s + parseFloat(t.pnlPct), 0) / losses.length).toFixed(1) : "0.0";
 
   res.json({
-    trades: trades.slice(-100), // last 100 trades
+    trades: trades.slice(-100),
     stats: {
       trades: trades.length,
       wins: wins.length,
@@ -272,6 +277,14 @@ app.get("/trades", async (req, res) => {
       avgWin: `+${avgWin}%`,
       avgLoss: `${avgLoss}%`,
       netPnL: (wins.length * parseFloat(avgWin) + losses.length * parseFloat(avgLoss)).toFixed(1)
-    }
+    },
+    equityCurve: equityHistory.length > 0 ? equityHistory : [{ time: new Date().toISOString(), equity: accountEquity }]
   });
+});
+
+app.listen(8080, "0.0.0.0", () => {
+  console.log("\nALPHASTREAM v98 ELITE — 7 WARRIOR PATTERNS — EQUITY CURVE LIVE");
+  syncAlpacaAccount();
+  setInterval(scanAndTrade, 180000);
+  scanAndTrade();
 });
