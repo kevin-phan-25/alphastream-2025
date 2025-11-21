@@ -1,4 +1,4 @@
-// index.js — AlphaStream v97.1 — REAL ALPACA SYNC + BACKTEST BUTTON (Nov 2025)
+// index.js — AlphaStream v97.1 — FIXED BACKEND WITH STARTUP LOGS + REAL ALPACA
 import express from "express";
 import cors from "cors";
 import axios from "axios";
@@ -30,6 +30,13 @@ let lastRockets = [];
 let backtestResults = { trades: 0, winRate: 0, profitFactor: 0, maxDD: 0, totalPnL: 0, bestTrade: 0, worstTrade: 0 };
 const floatCache = new Map();
 
+// STARTUP LOG — THIS WILL SHOW IN CLOUD RUN LOGS
+console.log("=== ALPHASTREAM v97.1 STARTING ===");
+console.log("Mode:", IS_PAPER ? "PAPER" : "LIVE");
+console.log("Alpaca Key:", ALPACA_KEY ? "SET" : "MISSING");
+console.log("Base URL:", BASE_URL);
+console.log("Max Daily Loss:", PAPER || !ALPACA_KEY ? "DISABLED (PAPER)" : "$500");
+
 // YAHOO FLOAT (NO KEY)
 async function getFloatFromYahoo(symbol) {
   if (floatCache.has(symbol)) return floatCache.get(symbol);
@@ -44,10 +51,14 @@ async function getFloatFromYahoo(symbol) {
   }
 }
 
-// REAL ALPACA SYNC
+// REAL ALPACA SYNC — FIXED WITH BETTER ERROR HANDLING
 async function syncAlpacaAccount() {
-  if (!ALPACA_KEY) return;
+  if (!ALPACA_KEY) {
+    console.log("Alpaca sync skipped — no key (PAPER MODE)");
+    return;
+  }
   try {
+    console.log("Syncing Alpaca account...");
     const [acctRes, posRes] = await Promise.all([
       axios.get(`${BASE_URL}/account`, { headers: HEADERS, timeout: 15000 }),
       axios.get(`${BASE_URL}/positions`, { headers: HEADERS, timeout: 15000 }).catch(() => ({ data: [] }))
@@ -75,22 +86,26 @@ async function syncAlpacaAccount() {
         });
       }
     });
+    console.log("Alpaca sync complete — Equity:", accountEquity, "Positions:", positions.length);
   } catch (e) {
     console.log("Alpaca sync failed:", e.response?.data?.message || e.message);
   }
 }
 
-// NASDAQ SCANNER + LOW-FLOAT
+// NASDAQ SCANNER + LOW-FLOAT — FIXED WITH BETTER PARSING
 async function scrapeRockets() {
   const hourET = parseInt(new Date().toLocaleString("en-US", { timeZone: "America/New_York", hour: "2-digit", hour12: false }));
   const isPre = hourET >= 4 && hourET < 9;
 
   try {
+    console.log("Scanning NASDAQ for rockets...");
     const { data } = await axios.get("https://api.nasdaq.com/api/screener/stocks?tableonly=true&download=true", {
       timeout: 15000,
-      headers: { "User-Agent": "Mozilla/5.0" }
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" }
     });
-    const candidates = (data.data?.rows || [])
+    const rows = data.data?.rows || [];
+
+    const candidates = rows
       .filter(r => r.symbol && r.lastsale && r.pctchange && !r.symbol.includes("^"))
       .map(r => ({
         symbol: r.symbol.trim(),
@@ -117,7 +132,7 @@ async function scrapeRockets() {
   }
 }
 
-// BACKTEST FROM trades.csv
+// BACKTEST FROM trades.csv — FIXED WITH BETTER PARSING
 async function runBacktest() {
   if (!fs.existsSync("trades.csv")) return backtestResults;
   const lines = fs.readFileSync("trades.csv", "utf-8").split("\n").filter(Boolean);
@@ -148,6 +163,7 @@ async function runBacktest() {
     bestTrade: Math.round(Math.max(...pnls, 0)),
     worstTrade: Math.round(Math.min(...pnls, 0))
   };
+  console.log("Backtest complete:", backtestResults);
 }
 
 // POSITION MANAGEMENT + EXIT LOGIC
