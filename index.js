@@ -1,16 +1,14 @@
-// index.js — AlphaStream v83.0 — FIXED: Scraper + PnL + Win Rate + Modal
+// index.js — AlphaStream v83.0 — TIMEOUT FIXED + REAL GAINERS + LIVE LOGS
 import express from "express";
 import cors from "cors";
 import axios from "axios";
 import * as cheerio from "cheerio";
 import { gotScraping } from "got-scraping";
-import fs from "fs";
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ----------------- ENV -----------------
 const {
   ALPACA_KEY = "",
   ALPACA_SECRET = "",
@@ -30,17 +28,17 @@ const HEADERS = {
   "APCA-API-SECRET-KEY": ALPACA_SECRET
 };
 
-// ----------------- CORE DATA -----------------
 let accountEquity = 100000;
 let positions = [];
 let tradeLog = [];
-let closedTrades = []; // For real win rate
 let lastGainers = [];
 let lastScanTime = 0;
 let dailyPnL = 0;
 let dailyMaxLossHit = false;
 
-// ----------------- LOGGING -----------------
+console.log(`\nALPHASTREAM v83.0 — TIMEOUT FIXED & LIVE`);
+console.log(`Mode → ${DRY ? "DRY" : "LIVE"} | Max Loss $${MAX_LOSS}\n`);
+
 function logTrade(type, symbol, qty, price, reason = "", pnl = 0) {
   const trade = {
     type,
@@ -60,7 +58,6 @@ function logTrade(type, symbol, qty, price, reason = "", pnl = 0) {
     `[${DRY ? "DRY" : "LIVE"}] ${type} ${symbol} ×${qty} @ $${price} | ${reason} | PnL $${pnl.toFixed(2)} | Daily $${dailyPnL.toFixed(2)}`
   );
 
-  // Save to file (safe for Cloud Run)
   try {
     fs.writeFileSync("/tmp/tradeLog.json", JSON.stringify(tradeLog, null, 2));
   } catch {}
@@ -69,13 +66,8 @@ function logTrade(type, symbol, qty, price, reason = "", pnl = 0) {
     dailyMaxLossHit = true;
     console.log(`MAX DAILY LOSS HIT — TRADING HALTED ($${dailyPnL.toFixed(2)})`);
   }
-
-  // Track closed trades for win rate
-  if (type === "EXIT") closedTrades.push({ win: pnl > 0, pnl });
-  if (closedTrades.length > 1000) closedTrades.shift();
 }
 
-// ----------------- ALPACA SYNC -----------------
 async function updateEquityAndPositions() {
   if (!ALPACA_KEY) {
     console.log("No Alpaca keys — using mock $100k");
@@ -101,7 +93,6 @@ async function updateEquityAndPositions() {
   }
 }
 
-// ----------------- YAHOO SCRAPER FIXED — NO HEADER OVERFLOW -----------------
 async function getTopGainers() {
   const now = Date.now();
   if (now - lastScanTime < 60000 && lastGainers.length > 0) return lastGainers;
@@ -109,33 +100,32 @@ async function getTopGainers() {
   try {
     const res = await gotScraping.get("https://finance.yahoo.com/gainers", {
       headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130 Safari/537.36",
         "Accept": "text/html",
         "Accept-Encoding": "gzip, deflate, br",
         "Accept-Language": "en-US,en;q=0.9"
       },
-      timeout: 20000,
+      timeout: { request: 20000 },
       retry: { limit: 2 }
     });
 
     const $ = cheerio.load(res.body);
-    const rows = $("table tbody tr").toArray();
+    const rows = $("table tbody tr").slice(0, 50).toArray();
     const candidates = [];
 
     for (const row of rows) {
       const tds = $(row).find("td");
       const symbol = tds.eq(0).find("a").text().trim() || tds.eq(0).text().trim();
-      const priceText = tds.eq(2).text().trim() || tds.filter((_, el) => $(el).text().match(/^\d+(\.\d+)?$/)).first().text();
-      const price = parseFloat(priceText.replace(/,/g, "")) || 0;
-      const changeText = tds.eq(3).text().trim() || tds.filter((_, el) => $(el).text().includes("%")).first().text();
-      const changePct = parseFloat(changeText);
-      const volumeText = tds.eq(5).text().trim() || tds.filter((_, el) => $(el).text().match(/[0-9\.]+[MK]?/)).last().text();
-      const volNum = volumeText.includes("M") ? parseFloat(volumeText) * 1e6 : volumeText.includes("K") ? parseFloat(volumeText) * 1e3 : parseFloat(volumeText.replace(/,/g, "")) || 0;
+      const price = parseFloat(tds.eq(2).text().replace(/,/g, "")) || 0;
+      const changeText = tds.eq(3).text().trim();
+      const volumeText = tds.eq(5).text().trim();
 
       if (!symbol || !changeText.includes("+")) continue;
+      const change = parseFloat(changeText);
+      const volNum = volumeText.includes("M") ? parseFloat(volumeText) * 1e6 : volumeText.includes("K") ? parseFloat(volumeText) * 1e3 : parseFloat(volumeText.replace(/,/g, "")) || 0;
 
-      if (changePct >= 7.5 && volNum >= 800000 && price >= 8 && price <= 350 && !positions.some(p => p.symbol === symbol)) {
-        candidates.push({ symbol, price, change: changePct });
+      if (change >= 7.5 && volNum >= 800000 && price >= 8 && price <= 350 && !positions.some(p => p.symbol === symbol)) {
+        candidates.push({ symbol, price, change });
       }
     }
 
@@ -149,7 +139,6 @@ async function getTopGainers() {
   }
 }
 
-// ----------------- POSITION MANAGEMENT -----------------
 async function managePositions() {
   for (const pos of positions.slice()) {
     const pnlPct = (pos.current - pos.entry) / pos.entry;
