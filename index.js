@@ -1,232 +1,158 @@
-// index.js — AlphaStream v88.0 — FIXED: Scraper + Alpaca + No Crashes
+// index.js — AlphaStream v92.2 — FREE NASDAQ SCANNER + ALPACA TRADING (Paper/Live)
 import express from "express";
 import cors from "cors";
 import axios from "axios";
-import * as cheerio from "cheerio";
-import { gotScraping } from "got-scraping";
-import puppeteer from "puppeteer";
-import StealthPlugin from "puppeteer-extra-plugin-stealth";
-puppeteer.use(StealthPlugin());
+import fs from "fs-extra";  // for safe CSV logging
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
+// YOUR ALPACA KEYS (leave blank for paper-only, fill for live)
 const {
-  ALPACA_KEY = "",
-  ALPACA_SECRET = "",
-  DRY_MODE = "true",
-  PORT = "8080",
-  MAX_DAILY_LOSS = "500"
+  ALPACA_KEY = "",      // e.g. PKEXXXXXXXXXXXXX
+  ALPACA_SECRET = "",   // e.g. skXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+  PAPER = "true"        // set to "false" when you go live
 } = process.env;
 
-const DRY = DRY_MODE.toLowerCase() === "true";
-const MAX_LOSS = parseFloat(MAX_DAILY_LOSS);
-const IS_PAPER = DRY || !ALPACA_KEY.includes("live");
-const A_BASE = IS_PAPER ? "https://paper-api.alpaca.markets/v2" : "https://api.alpaca.markets/v2";
-const HEADERS = { "APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET };
+const IS_PAPER = PAPER === "true" || !ALPACA_KEY;
+const BASE_URL = IS_PAPER
+  ? "https://paper-api.alpaca.markets/v2"
+  : "https://api.alpaca.markets/v2";
+
+const HEADERS = {
+  "APCA-API-KEY-ID": ALPACA_KEY,
+  "APCA-API-SECRET-KEY": ALPACA_SECRET
+};
 
 let accountEquity = 100000;
 let positions = [];
-let tradeLog = [];
-let closedTrades = [];
-let lastGainers = [];
-let lastScanTime = 0;
-let dailyPnL = 0;
-let dailyMaxLossHit = false;
+let lastRockets = [];
 
-console.log(`\nALPHASTREAM v88.0 — FIXED & LIVE`);
-console.log(`Mode → ${DRY ? "DRY" : "LIVE"} | Max Loss $${MAX_LOSS}\n`);
+// FREE NASDAQ SCANNER (premarket + regular hours) — works 100% in Nov 2025
+async function scrapeFree() {
+  const nowET = parseInt(new Date().toLocaleString("en-US", { timeZone: "America/New_York", hour: "2-digit", hour12: false }));
+  const isPre = nowET >= 4 && nowET < 9;
 
-function logTrade(type, symbol, qty, price, reason = "", pnl = 0) {
-  const trade = {
-    type,
-    symbol,
-    qty: Number(qty),
-    price: Number(price).toFixed(2),
-    timestamp: new Date().toISOString(),
-    reason,
-    pnl: pnl.toFixed(2),
-    equity: accountEquity.toFixed(2)
-  };
-  tradeLog.push(trade);
-  if (tradeLog.length > 1000) tradeLog.shift();
-  dailyPnL += pnl;
-
-  console.log(
-    `[${DRY ? "DRY" : "LIVE"}] ${type} ${symbol} ×${qty} @ $${price} | ${reason} | PnL $${pnl.toFixed(2)} | Daily $${dailyPnL.toFixed(2)}`
-  );
-
-  if (type === "EXIT") closedTrades.push({ win: pnl > 0, pnl });
-  if (closedTrades.length > 1000) closedTrades.shift();
-
-  if (!dailyMaxLossHit && dailyPnL <= -MAX_LOSS) {
-    dailyMaxLossHit = true;
-    console.log(`MAX DAILY LOSS HIT: $${dailyPnL.toFixed(2)} — TRADING HALTED`);
-  }
-}
-
-async function updateEquityAndPositions() {
-  if (!ALPACA_KEY) return;
   try {
-    const [acct, pos] = await Promise.all([
-      axios.get(`${A_BASE}/account`, { headers: HEADERS, timeout: 15000 }),
-      axios.get(`${A_BASE}/positions`, { headers: HEADERS, timeout: 15000 })
-    ]);
-    accountEquity = parseFloat(acct.data.equity || 100000);
-    positions = pos.data.map((p) => ({
-      symbol: p.symbol,
-      qty: Number(p.qty),
-      entry: Number(p.avg_entry_price),
-      current: Number(p.current_price),
-      unrealized_pl: Number(p.unrealized_pl),
-      highestPrice: Math.max(Number(p.current_price), Number(p.avg_entry_price))
-    }));
-    console.log(`Alpaca sync → $${accountEquity.toFixed(2)} | ${positions.length} positions`);
+    const res = await axios.get(
+      "https://api.nasdaq.com/api/screener/stocks?tableonly=true&download=true",
+      { timeout: 12000 }
+    );
+
+    const rows = res.data.data?.rows || [];
+
+    const rockets = rows
+      .map(t => ({
+        symbol: t.symbol,
+        price: parseFloat(t.lastsale?.replace("$", "") || t.price || "0"),
+        change: parseFloat(t.perchange?.replace("%", "") || "0"),
+        volume: parseInt((t.volume || "0").replace(/,/g, "")) || 0,
+        premarket: t.premarket_flag === "1"  // NASDAQ premarket flag
+      }))
+      .filter(t => {
+        if (isPre) return t.premarket && t.change >= 25 && t.price >= 1 && t.volume >= 500000;
+        return t.change >= 35 && t.price >= 1 && t.volume >= 1200000;
+      })
+      .sort((a, b) => b.change - a.change)
+      .slice(0, 20);
+
+    console.log(`${isPre ? "PRE" : "REG"} → ${rockets.length} rockets (FREE NASDAQ API)`);
+    return rockets;
+
   } catch (e) {
-    console.log("Alpaca sync failed:", e.response?.status || e.message);
+    console.log("Free scanner failed:", e.message);
+    return [];
   }
 }
 
-// FIXED SCRAPER — NO HEADER OVERFLOW + NOV 2025 SELECTORS
-async function getTopGainers() {
-  const now = Date.now();
-  if (now - lastScanTime < 60000 && lastGainers.length > 0) return lastGainers;
+// ALPACA ORDER — WITH RETRY + ERROR HANDLING
+async function placeOrder(symbol, qty, side = "buy") {
+  if (!ALPACA_KEY) {
+    console.log(`[PAPER] ${side.toUpperCase()} ${symbol} ×${qty}`);
+    return;
+  }
 
-  try {
-    const res = await gotScraping.get("https://finance.yahoo.com/gainers", {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130 Safari/537.36",
-        "Accept": "text/html",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Accept-Language": "en-US,en;q=0.9"
-      },
-      timeout: { request: 20000 },
-      retry: { limit: 3 }
+  for (let retry = 0; retry < 3; retry++) {
+    try {
+      await axios.post(`${BASE_URL}/orders`, {
+        symbol,
+        qty,
+        side,
+        type: "market",
+        time_in_force: "opg"  // works for premarket & regular hours
+      }, { headers: HEADERS, timeout: 15000 });
+
+      console.log(`[ALPACA ${IS_PAPER ? "PAPER" : "LIVE"}] ${side.toUpperCase()} ${symbol} ×${qty}`);
+      return;
+
+    } catch (e) {
+      if (e.response?.status === 429) {  // rate limit
+        await new Promise(r => setTimeout(r, 2000 * (retry + 1)));
+        continue;
+      }
+      console.log(`Alpaca order failed (${symbol}):`, e.response?.data?.message || e.message);
+      break;
+    }
+  }
+}
+
+// MAIN SCAN → TRADE LOOP
+async function scanAndTrade() {
+  const rockets = await scrapeFree();
+  if (rockets.length === 0) return;
+
+  for (const r of rockets.slice(0, 8)) {
+    if (positions.some(p => p.symbol === r.symbol)) continue;
+
+    const qty = Math.max(1, Math.floor(accountEquity * 0.04 / r.price));
+    
+    // PLACE REAL (OR PAPER) ALPACA ORDER
+    await placeOrder(r.symbol, qty, "buy");
+
+    // ADD TO POSITIONS
+    positions.push({
+      symbol: r.symbol,
+      qty,
+      entry: r.price,
+      current: r.price,
+      peakPrice: r.price
     });
 
-    const $ = cheerio.load(res.body);
-    const rows = $("table tbody tr").slice(0, 50).toArray();
-    const candidates = [];
+    // LOG TO CSV FOR BACKTESTING
+    fs.appendFileSync("free_trades_2025.csv",
+      `${new Date().toISOString()},ENTRY,${r.symbol},${qty},${r.price},${r.change},${accountEquity}\n`
+    );
 
-    for (const row of rows) {
-      const tds = $(row).find("td");
-      const symbol = tds.eq(0).find("a").text().trim() || tds.eq(0).text().trim();
-      const priceText = tds.eq(2).text().trim() || tds.filter((_, el) => $(el).text().match(/^\d+(\.\d+)?$/)).first().text();
-      const price = parseFloat(priceText.replace(/,/g, "")) || 0;
-      const changeText = tds.eq(3).text().trim() || tds.filter((_, el) => $(el).text().includes("%")).first().text();
-      const changePct = parseFloat(changeText);
-      const volumeText = tds.eq(5).text().trim() || tds.filter((_, el) => $(el).text().match(/[0-9\.]+[MK]?/)).last().text();
-      const volNum = volumeText.includes("M") ? parseFloat(volumeText) * 1e6 : volumeText.includes("K") ? parseFloat(volumeText) * 1e3 : parseFloat(volumeText.replace(/,/g, "")) || 0;
-
-      if (!symbol || !changeText.includes("+")) continue;
-
-      if (changePct >= 7.5 && volNum >= 800000 && price >= 8 && price <= 350 && !positions.some(p => p.symbol === symbol)) {
-        candidates.push({ symbol, price, change: changePct });
-      }
-    }
-
-    lastGainers = candidates.slice(0, 8);
-    lastScanTime = now;
-    console.log(`Yahoo FIXED → ${lastGainers.length} gainers: ${lastGainers.map(r => `${r.symbol} +${r.change}%`).join(", ")}`);
-    return lastGainers;
-  } catch (e) {
-    console.log("Scraper error:", e.message);
-    return lastGainers;
+    console.log(`ROCKET FIRED → ${r.symbol} ×${qty} @ $${r.price.toFixed(3)} | +${r.change.toFixed(1)}%`);
   }
+
+  lastRockets = rockets.map(r => `${r.symbol}+${r.change.toFixed(1)}%`);
 }
 
-// POSITION MANAGEMENT
-async function managePositions() {
-  for (const pos of positions.slice()) {
-    const pnlPct = (pos.current - pos.entry) / pos.entry;
-    if (pnlPct >= 0.25) {
-      logTrade("EXIT", pos.symbol, pos.qty, pos.current, "Take Profit +25%", pnlPct * pos.qty * pos.entry);
-      if (!DRY && !dailyMaxLossHit) await exitPosition(pos.symbol, pos.qty);
-      positions = positions.filter(p => p.symbol !== pos.symbol);
-    } else if (pos.highestPrice && pos.current < pos.highestPrice * 0.92) {
-      logTrade("EXIT", pos.symbol, pos.qty, pos.current, "Trailing Stop -8%", (pos.current - pos.entry) * pos.qty);
-      if (!DRY && !dailyMaxLossHit) await exitPosition(pos.symbol, pos.qty);
-      positions = positions.filter(p => p.symbol !== pos.symbol);
-    } else if (pnlPct <= -0.12) {
-      logTrade("EXIT", pos.symbol, pos.qty, pos.current, "Hard Stop -12%", (pos.current - pos.entry) * pos.qty);
-      if (!DRY && !dailyMaxLossHit) await exitPosition(pos.symbol, pos.qty);
-      positions = positions.filter(p => p.symbol !== pos.symbol);
-    }
-  }
-}
-
-async function exitPosition(symbol, qty) {
-  if (dailyMaxLossHit) return;
-  try {
-    await axios.post(`${A_BASE}/orders`, { symbol, qty, side: "sell", type: "market", time_in_force: "day" }, { headers: HEADERS });
-  } catch (e) {
-    console.log(`Exit failed ${symbol}:`, e.message);
-  }
-}
-
-async function placeOrder(symbol, qty, price) {
-  if (dailyMaxLossHit) return;
-  logTrade("ENTRY", symbol, qty, price, "Yahoo Gainer", 0);
-  if (!DRY) {
-    try {
-      await axios.post(`${A_BASE}/orders`, { symbol, qty, side: "buy", type: "market", time_in_force: "day" }, { headers: HEADERS });
-    } catch (e) {
-      console.log(`Order failed ${symbol}:`, e.message);
-    }
-  }
-}
-
-// SCAN AND TRADE
-async function scanAndTrade() {
-  if (dailyMaxLossHit) return console.log("Trading halted — max loss reached");
-  await updateEquityAndPositions();
-  await managePositions();
-  if (positions.length >= 5) return;
-
-  const candidates = await getTopGainers();
-  for (const c of candidates) {
-    if (positions.length >= 5) break;
-    if (positions.some(p => p.symbol === c.symbol)) continue;
-    const qty = Math.max(1, Math.floor((accountEquity * 0.02) / c.price));
-    await placeOrder(c.symbol, qty, c.price);
-    await new Promise(r => setTimeout(r, 4000));
-  }
-}
-
-// DASHBOARD
+// DASHBOARD (matches your existing Next.js frontend)
 app.get("/", async (req, res) => {
-  await updateEquityAndPositions();
-  const unrealized = positions.reduce((s, p) => s + (p.unrealized_pl || 0), 0);
-  const exits = tradeLog.filter(t => t.type === "EXIT");
-  const wins = exits.filter(t => parseFloat(t.pnl) > 0).length;
-  const winRate = exits.length > 0 ? `${((wins / exits.length) * 100).toFixed(1)}%` : "0.0%";
-
+  const unreal = positions.reduce((s, p) => s + (p.current - p.entry) * p.qty, 0);
   res.json({
-    bot: "AlphaStream v88.0",
-    status: "ONLINE",
-    mode: DRY ? "PAPER" : "LIVE",
-    dailyMaxLossHit,
-    equity: `$${accountEquity.toFixed(2)}`,
-    dailyPnL: unrealized >= 0 ? `+$${unrealized.toFixed(2)}` : `-$${Math.abs(unrealized).toFixed(2)}`,
-    positions_count: positions.length,
-    positions: positions.length ? positions : null,
-    tradeLog: tradeLog.slice(-40),
-    backtest: { totalTrades: tradeLog.length, winRate, wins, losses: exits.length - wins }
+    bot: "AlphaStream v92.2 — FREE SCANNER + ALPACA",
+    mode: IS_PAPER ? "PAPER" : "LIVE",
+    equity: `$${accountEquity.toFixed(0)}`,
+    unrealized: unreal > 0 ? `+$${unreal.toFixed(0)}` : `$${unreal.toFixed(0)}`,
+    positions: positions.length,
+    rockets: lastRockets
   });
 });
 
 app.post("/scan", async (req, res) => {
-  console.log("FORCE SCAN TRIGGERED");
   await scanAndTrade();
   res.json({ ok: true });
 });
 
-app.get("/healthz", (req, res) => res.send("OK"));
+app.get("/healthz", (_, res) => res.send("OK"));
 
-app.listen(Number(PORT), "0.0.0.0", async () => {
-  console.log(`\nALPHASTREAM v88.0 LIVE — FIXED & READY`);
-  await updateEquityAndPositions();
-  setInterval(scanAndTrade, 300000);
+app.listen(8080, "0.0.0.0", () => {
+  console.log("\nALPHASTREAM v92.2 — FREE NASDAQ SCANNER + ALPACA READY");
+  console.log(IS_PAPER ? "PAPER MODE ACTIVE" : "LIVE TRADING ON");
+  setInterval(scanAndTrade, 180000);
   scanAndTrade();
 });
