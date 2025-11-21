@@ -1,4 +1,4 @@
-// index.js — AlphaStream v97.1 — FIXED BACKEND WITH STARTUP LOGS + REAL ALPACA
+// index.js — AlphaStream v97.2 — NASDAQ PRE/POST-MARKET SCANNER + ALPACA (Nov 2025)
 import express from "express";
 import cors from "cors";
 import axios from "axios";
@@ -30,12 +30,11 @@ let lastRockets = [];
 let backtestResults = { trades: 0, winRate: 0, profitFactor: 0, maxDD: 0, totalPnL: 0, bestTrade: 0, worstTrade: 0 };
 const floatCache = new Map();
 
-// STARTUP LOG — THIS WILL SHOW IN CLOUD RUN LOGS
-console.log("=== ALPHASTREAM v97.1 STARTING ===");
+// STARTUP LOGS
+console.log("=== ALPHASTREAM v97.2 STARTING ===");
 console.log("Mode:", IS_PAPER ? "PAPER" : "LIVE");
 console.log("Alpaca Key:", ALPACA_KEY ? "SET" : "MISSING");
 console.log("Base URL:", BASE_URL);
-console.log("Max Daily Loss:", PAPER || !ALPACA_KEY ? "DISABLED (PAPER)" : "$500");
 
 // YAHOO FLOAT (NO KEY)
 async function getFloatFromYahoo(symbol) {
@@ -51,7 +50,7 @@ async function getFloatFromYahoo(symbol) {
   }
 }
 
-// REAL ALPACA SYNC — FIXED WITH BETTER ERROR HANDLING
+// REAL ALPACA SYNC
 async function syncAlpacaAccount() {
   if (!ALPACA_KEY) {
     console.log("Alpaca sync skipped — no key (PAPER MODE)");
@@ -92,7 +91,7 @@ async function syncAlpacaAccount() {
   }
 }
 
-// NASDAQ SCANNER + LOW-FLOAT — FIXED WITH BETTER PARSING
+// FIXED NASDAQ PRE/POST-MARKET SCANNER
 async function scrapeRockets() {
   const hourET = parseInt(new Date().toLocaleString("en-US", { timeZone: "America/New_York", hour: "2-digit", hour12: false }));
   const isPre = hourET >= 4 && hourET < 9;
@@ -111,7 +110,8 @@ async function scrapeRockets() {
         symbol: r.symbol.trim(),
         price: parseFloat(r.lastsale.replace("$", "")),
         change: parseFloat(r.pctchange.replace("%", "")),
-        volume: parseInt((r.volume || "0").replace(/,/g, ""), 10)
+        volume: parseInt((r.volume || "0").replace(/,/g, ""), 10),
+        premarket: r.premarket_flag === "1"  // NASDAQ premarket flag
       }))
       .filter(t => t.price >= 0.8 && Math.abs(t.change) > (isPre ? 20 : 30));
 
@@ -123,7 +123,7 @@ async function scrapeRockets() {
     }
 
     return rockets
-      .filter(r => isPre ? r.change >= 25 && r.volume >= 500000 : r.change >= 35 && r.volume >= 1200000)
+      .filter(r => isPre ? r.premarket && r.change >= 25 && r.volume >= 500000 : r.change >= 35 && r.volume >= 1200000)
       .sort((a, b) => b.change - a.change)
       .slice(0, 12);
   } catch (e) {
@@ -132,7 +132,7 @@ async function scrapeRockets() {
   }
 }
 
-// BACKTEST FROM trades.csv — FIXED WITH BETTER PARSING
+// BACKTEST FROM trades.csv
 async function runBacktest() {
   if (!fs.existsSync("trades.csv")) return backtestResults;
   const lines = fs.readFileSync("trades.csv", "utf-8").split("\n").filter(Boolean);
