@@ -1,4 +1,4 @@
-// index.js — AlphaStream v98 WARRIOR EDITION — FINAL & PERFECT
+// index.js — AlphaStream v98 ELITE EDITION — FINAL & PERFECT
 import express from "express";
 import cors from "cors";
 import axios from "axios";
@@ -75,8 +75,8 @@ async function fetch1minBars(symbol) {
   }
 }
 
-// ==================== 7 WARRIOR PATTERNS — PERFECTED ====================
-function detectWarriorPatterns(bars) {
+// ==================== 7 ELITE PATTERNS — PERFECTED ====================
+function detectELITEPatterns(bars) {
   if (bars.length < 40) return null;
   const recent = bars.slice(-40);
   const c = recent.map(b => b.c);
@@ -121,9 +121,9 @@ function detectWarriorPatterns(bars) {
   return null;
 }
 
-// ==================== NASDAQ SCANNER + WARRIOR FILTER ====================
+// ==================== NASDAQ SCANNER + ELITE FILTER ====================
 async function scrapeRockets() {
-  console.log("WARRIOR EDITION v98 — Scanning with 7 patterns...");
+  console.log("ELITE EDITION v98 — Scanning with 7 patterns...");
   try {
     const { data } = await axios.get("https://api.nasdaq.com/api/screener/stocks?tableonly=true&download=true", {
       timeout: 15000,
@@ -146,11 +146,11 @@ async function scrapeRockets() {
       if (fl > 40_000_000) continue;
 
       const bars = await fetch1minBars(c.symbol);
-      const pattern = detectWarriorPatterns(bars);
+      const pattern = detectELITEPatterns(bars);
 
       if (pattern) {
         rockets.push({ ...c, float: fl, pattern });
-        console.log(`WARRIOR ROCKET → ${c.symbol} +${c.change.toFixed(1)}% (${(fl/1e6).toFixed(1)}M) → ${pattern.toUpperCase()}`);
+        console.log(`ELITE ROCKET → ${c.symbol} +${c.change.toFixed(1)}% (${(fl/1e6).toFixed(1)}M) → ${pattern.toUpperCase()}`);
       }
       await new Promise(r => setTimeout(r, 280));
     }
@@ -205,13 +205,13 @@ app.get("/", async (req, res) => {
   await scanAndTrade();
   const unreal = positions.reduce((s, p) => s + (p.current - p.entry) * p.qty, 0);
   res.json({
-    bot: "AlphaStream v98 — WARRIOR EDITION",
+    bot: "AlphaStream v98 — ELITE EDITION",
     mode: IS_PAPER ? "PAPER" : "LIVE",
     equity: `$${Number(accountEquity).toFixed(0)}`,
     unrealized: unreal > 0 ? `+$${unreal.toFixed(0)}` : `$${unreal.toFixed(0)}`,
     positions: positions.length,
     rockets: lastRockets,
-    pattern: "7 WARRIOR PATTERNS ACTIVE"
+    pattern: "7 ELITE PATTERNS ACTIVE"
   });
 });
 
@@ -219,7 +219,7 @@ app.post("/scan", async (req, res) => { await scanAndTrade(); res.json({ ok: tru
 app.post("/backtest", async (req, res) => { /* your backtest code */ res.json({ backtest: backtestResults }); });
 
 app.listen(8080, "0.0.0.0", () => {
-  console.log("\nALPHASTREAM v98 — WARRIOR EDITION — 7 PATTERNS LIVE — SNIPING MODE");
+  console.log("\nALPHASTREAM v98 — ELITE EDITION — 7 PATTERNS LIVE — SNIPING MODE");
   syncAlpacaAccount();
   setInterval(scanAndTrade, 180000);
   scanAndTrade();
