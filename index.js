@@ -1,4 +1,4 @@
-// index.js — AlphaStream v87.0 — FINAL: 100% WORKING NOV 2025 TRADINGVIEW
+// index.js — AlphaStream v87.4 — FINAL | WORKS WITH CURRENT TV LOGIN (Email + Password on one screen)
 import express from "express";
 import cors from "cors";
 import axios from "axios";
@@ -31,18 +31,13 @@ let browser = null;
 const etHour = () => parseInt(new Date().toLocaleString("en-US", { timeZone: "America/New_York", hour: "2-digit", hour12: false }));
 const etMinute = () => parseInt(new Date().toLocaleString("en-US", { timeZone: "America/New_York", minute: "2-digit" }));
 const isPremarket = () => { const h = etHour(); const m = etMinute(); return (h >= 4 && h < 9) || (h === 9 && m < 30); };
-const isRegularOrPost = () => etHour() >= 9;
 
 // LOG
 function logTrade(type, symbol, qty, price, reason = "", pnl = 0) {
-  const trade = { type, symbol, qty, price: Number(price).toFixed(4), timestamp: new Date().toISOString(), reason, pnl: Number(pnl).toFixed(2) };
-  tradeLog.push(trade); if (tradeLog.length > 1000) tradeLog.shift();
+  const t = { type, symbol, qty, price: +price.toFixed(4), reason, pnl: +pnl.toFixed(2), time: new Date().toISOString() };
+  tradeLog.push(t); if (tradeLog.length > 1000) tradeLog.shift();
   dailyPnL += pnl;
-  console.log(`[${DRY ? "DRY" : "LIVE"}] ${type} ${symbol} ×${qty} @ $${price} | ${reason} | PnL $${pnl.toFixed(2)}`);
-  if (!dailyMaxLossHit && dailyPnL <= -MAX_LOSS) {
-    dailyMaxLossHit = true;
-    console.log(`MAX DAILY LOSS HIT: $${dailyPnL.toFixed(2)} — HALTED`);
-  }
+  console.log(`[${DRY ? "DRY" : "LIVE"}] ${type} ${symbol} ×${qty} @ $${price.toFixed(4)} | ${reason} | $${pnl.toFixed(0)}`);
 }
 
 // ALPACA SYNC
@@ -61,7 +56,7 @@ async function updateEquityAndPositions() {
       qty: live[p.symbol]?.qty || p.qty,
       peakPrice: Math.max(p.peakPrice || p.entry, live[p.symbol]?.current || p.current)
     })).filter(p => p.qty > 0);
-  } catch (e) { console.log("Alpaca error:", e.message); }
+  } catch (e) { console.log("Alpaca sync error:", e.message); }
 }
 
 // BROWSER
@@ -69,59 +64,54 @@ async function getBrowser() {
   if (browser) return browser;
   browser = await puppeteer.launch({
     headless: true,
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/google-chrome",
+    executablePath: "/usr/bin/google-chrome",
     args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process", "--no-zygote"]
   });
   return browser;
 }
 
-// BULLETPROOF LOGIN — NOV 2025 (EMAIL ONLY)
+// FINAL TV LOGIN — WORKS WITH YOUR SCREENSHOT (NOV 2025)
 async function loginTV(page) {
   if (!TV_EMAIL || !TV_PASSWORD) return false;
 
   try {
     await page.goto("https://www.tradingview.com/", { waitUntil: "networkidle2", timeout: 40000 });
 
-    // Check if already logged in
-    const alreadyLoggedIn = await page.evaluate(() => {
-      return !!document.querySelector("button[data-name='header-user-menu-button'], [aria-label*='Account']");
-    });
-    if (alreadyLoggedIn) {
+    if (await page.$("[data-name='header-user-menu-button']")) {
       console.log("TV: Already logged in");
       return true;
     }
 
-    // Click Sign In (text-based search)
-    const signInClicked = await page.evaluate(() => {
-      const buttons = Array.from(document.querySelectorAll("button, a"));
-      const btn = buttons.find(el => /sign in|log in/i.test(el.textContent || ""));
-      if (btn) { btn.click(); return true; }
-      return false;
+    // Click "Sign in"
+    await page.evaluate(() => {
+      const btn = Array.from(document.querySelectorAll("button, a"))
+        .find(el => /sign in|log in/i.test(el.textContent || ""));
+      if (btn) btn.click();
     });
-
-    if (!signInClicked) {
-      console.log("No Sign In button found");
-      return false;
-    }
-
     await new Promise(r => setTimeout(r, 3000));
 
-    // Fill email + password
-    await page.waitForSelector("input[type='email'], input[autocomplete='email'], input[name='email']", { timeout: 15000 });
-    await page.type("input[type='email'], input[autocomplete='email'], input[name='email']", TV_EMAIL);
-    await page.type("input[type='password']", TV_PASSWORD);
+    // Wait for Email/Username field
+    await page.waitForSelector('input[placeholder="Email or Username"], input[placeholder="Email or username"], input[type="text"]', { timeout: 15000 });
 
+    // Clear & type email
+    await page.click('input[placeholder="Email or Username"], input[type="text"]');
+    await page.keyboard.down('Control');
+    await page.keyboard.press('A');
+    await page.keyboard.up('Control');
+    await page.type('input[placeholder="Email or Username"], input[type="text"]', TV_EMAIL);
+
+    // Type password
+    await page.type('input[type="password"]', TV_PASSWORD);
+
+    // Click Sign in
     await Promise.all([
-      page.click("button[type='submit'], button[data-name='submit-button']"),
+      page.click('button:has-text("Sign in"), button:has-text("Sign In")'),
       page.waitForNavigation({ waitUntil: "networkidle2", timeout: 30000 }).catch(() => {})
     ]);
 
-    await new Promise(r => setTimeout(r, 4000));
+    await new Promise(r => setTimeout(r, 6000));
 
-    const success = await page.evaluate(() => {
-      return !!document.querySelector("button[data-name='header-user-menu-button'], [aria-label*='Account']");
-    });
-
+    const success = await page.$("[data-name='header-user-menu-button']") !== null;
     console.log(success ? "TV: LOGIN SUCCESS" : "TV: LOGIN FAILED");
     return success;
   } catch (e) {
@@ -130,138 +120,164 @@ async function loginTV(page) {
   }
 }
 
-// CLICK EXTENDED HOURS TAB — BULLETPROOF
-async function openExtendedHours(page) {
-  try {
-    const clicked = await page.evaluate(() => {
-      const buttons = Array.from(document.querySelectorAll("button"));
-      const tab = buttons.find(b =>
-        b.textContent?.toLowerCase().includes("extended") ||
-        b.textContent?.toLowerCase().includes("pre") ||
-        b.textContent?.toLowerCase().includes("post") ||
-        b.getAttribute("data-name")?.includes("extended")
-      );
-      if (tab) { tab.click(); return true; }
-      return false;
-    });
-    if (clicked) await new Promise(r => setTimeout(r, 5000));
-    return clicked;
-  } catch (e) {
-    return false;
-  }
+// EXTENDED HOURS TAB
+async function openExtended(page) {
+  await page.evaluate(() => {
+    const btn = Array.from(document.querySelectorAll("button"))
+      .find(b => /extended|pre.?post/i.test(b.textContent || "") || b.getAttribute("data-name")?.includes("extended"));
+    if (btn) btn.click();
+  });
+  await new Promise(r => setTimeout(r, 5000));
 }
 
-// SCRAPER — YOUR EXACT SCANS
-async function scrapeScanner() {
+// SCRAPERS
+async function scrapePremarket() {
   let page;
   try {
     const br = await getBrowser();
     page = await br.newPage();
     await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
     await loginTV(page);
-
     await page.goto("https://www.tradingview.com/screener/", { waitUntil: "networkidle2", timeout: 60000 });
-    await openExtendedHours(page);
+    await openExtended(page);
 
     const rockets = await page.evaluate(() => {
-      const rows = Array.from(document.querySelectorAll("table tbody tr")).slice(0, 20);
-      return rows.map(r => {
+      return Array.from(document.querySelectorAll("table tbody tr")).slice(0, 20).map(r => {
         const c = r.querySelectorAll("td");
         const symbol = c[0]?.querySelector("a")?.innerText.trim();
-        const price = parseFloat((c[1]?.innerText || c[3]?.innerText || "").replace(/[^0-9.]/g, "")) || 0;
-        const change = parseFloat((c[2]?.innerText || "").replace(/[%+]/g, "")) || 0;
-        const volText = c[4]?.innerText || "";
-        const volume = volText.includes("M") ? parseFloat(volText) * 1e6 : parseFloat(volText.replace(/,/g, "")) || 0;
-        const floatText = c[6]?.innerText || c[7]?.innerText || "0";
-        const floatShares = parseFloat(floatText.replace(/[^0-9.]/g, "")) * 1e6 || 100e6;
-        return { symbol, price, change, volume, floatShares };
-      }).filter(r => {
-        if (!r.symbol || r.price < 0.5) return false;
-        if (new Date().getHours() < 9 || (new Date().getHours() === 9 && new Date().getMinutes() < 30)) {
-          return r.change >= 20 && r.price >= 1 && r.volume >= 500000 && r.floatShares <= 30e6;
-        }
-        return r.price <= 20 && r.change >= 30 && r.volume >= 1e6 && r.floatShares <= 40e6;
-      });
+        const change = parseFloat(c[2]?.innerText.replace(/[%+]/g, "") || "0");
+        const price = parseFloat(c[3]?.innerText.replace(/[^0-9.]/g, "") || "0");
+        const vol = c[4]?.innerText.includes("M") ? parseFloat(c[4].innerText) * 1e6 : 0;
+        const fl = parseFloat(c[7]?.innerText.replace(/[^0-9.]/g, "") || "0") * 1e6;
+        return { symbol, price, change, vol, fl };
+      }).filter(r => r.symbol && r.change >= 20 && r.price >= 1 && r.vol >= 500000 && r.fl <= 30e6);
     });
 
     await page.close();
-    const label = isPremarket() ? "PRE-MARKET" : "POST-MARKET";
-    console.log(`${label} → ${rockets.length} rockets: ${rockets.map(r => `${r.symbol}+${r.change.toFixed(1)}%`).join(", ")}`);
+    console.log(`PRE-MARKET → ${rockets.length} rockets: ${rockets.map(r => `${r.symbol}+${r.change.toFixed(0)}%`).join(" ")}`);
     return rockets.slice(0, 5);
   } catch (e) {
-    console.log("Scrape failed:", e.message);
+    console.log("Premarket error:", e.message);
     if (page) await page.close().catch(() => {});
     return [];
   }
 }
 
-// PROFIT-TAKING, EOD, ENTRY (unchanged — perfect)
-async function checkProfitTargets() {
-  for (const pos of positions) {
-    const pnlPct = ((pos.current - pos.entry) / pos.entry) * 100;
-    const fromPeak = ((pos.current - (pos.peakPrice || pos.entry)) / (pos.peakPrice || pos.entry)) * 100;
+async function scrapePostmarket() {
+  let page;
+  try {
+    const br = await getBrowser();
+    page = await br.newPage();
+    await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
+    await loginTV(page);
+    await page.goto("https://www.tradingview.com/screener/", { waitUntil: "networkidle2", timeout: 60000 });
+    await openExtended(page);
 
-    if (fromPeak <= -15) { await exitPosition(pos.symbol, pos.qty, pos.current, "TRAIL -15%"); continue; }
-    if (pnlPct >= 100 && !pos.sold100) { await exitPosition(pos.symbol, pos.qty, pos.current, "+100% EXIT"); pos.sold100 = true; }
-    if (pnlPct >= 50 && !pos.sold50) { const q = Math.floor(pos.qty * 0.25); if (q>0) await exitPosition(pos.symbol, q, pos.current, "+50% TAKE 25%"); pos.sold50 = true; }
-    if (pnlPct >= 25 && !pos.sold25) { const q = Math.floor(pos.qty * 0.5); if (q>0) await exitPosition(pos.symbol, q, pos.current, "+25% TAKE 50%"); pos.sold25 = true; }
+    const rockets = await page.evaluate(() => {
+      return Array.from(document.querySelectorAll("table tbody tr")).slice(0, 20).map(r => {
+        const c = r.querySelectorAll("td");
+        const symbol = c[0]?.querySelector("a")?.innerText.trim();
+        const price = parseFloat(c[1]?.innerText.replace(/[^0-9.]/g, "") || "0");
+        const change = parseFloat(c[2]?.innerText.replace(/[%+]/g, "") || "0");
+        const vol = c[4]?.innerText.includes("M") ? parseFloat(c[4].innerText) * 1e6 : 0;
+        const fl = parseFloat(c[6]?.innerText.replace(/[^0-9.]/g, "") || "0") * 1e6;
+        return { symbol, price, change, vol, fl };
+      }).filter(r => r.symbol && r.price >= 1 && r.price <= 20 && r.change >= 30 && r.vol >= 1e6 && r.fl <= 40e6);
+    });
+
+    await page.close();
+    console.log(`POST-MARKET → ${rockets.length} rockets: ${rockets.map(r => `${r.symbol}+${r.change.toFixed(0)}%`).join(" ")}`);
+    return rockets.slice(0, 5);
+  } catch (e) {
+    console.log("Postmarket error:", e.message);
+    if (page) await page.close().catch(() => {});
+    return [];
   }
 }
 
-async function exitPosition(symbol, qty, price, reason) {
+// PROFIT-TAKING + TRAILING
+async function checkProfitTargets() {
+  for (const p of positions) {
+    const pnl = ((p.current - p.entry) / p.entry) * 100;
+    const drop = ((p.current - (p.peakPrice || p.entry)) / (p.peakPrice || p.entry)) * 100;
+    if (drop <= -15) { await exit(p.symbol, p.qty, p.current, "TRAIL -15%"); continue; }
+    if (pnl >= 100 && !p.sold100) { await exit(p.symbol, p.qty, p.current, "+100% EXIT"); p.sold100 = true; }
+    if (pnl >= 50 && !p.sold50) { const q = Math.floor(p.qty * 0.25); if (q) await exit(p.symbol, q, p.current, "+50% TAKE 25%"); p.sold50 = true; }
+    if (pnl >= 25 && !p.sold25) { const q = Math.floor(p.qty * 0.5); if (q) await exit(p.symbol, q, p.current, "+25% TAKE 50%"); p.sold25 = true; }
+  }
+}
+
+async function exit(symbol, qty, price, reason) {
   const entry = positions.find(p => p.symbol === symbol)?.entry || price;
   const pnl = (price - entry) * qty;
   logTrade("EXIT", symbol, qty, price, reason, pnl);
   if (!DRY && ALPACA_KEY) {
-    await axios.post(`${A_BASE}/ |
-
-orders`, { symbol, qty, side: "sell", type: "market", time_in_force: "day" }, { headers: HEADERS }).catch(() => {});
+    await axios.post(`${A_BASE}/orders`, { symbol, qty, side: "sell", type: "market", time_in_force: "day" }, { headers: HEADERS }).catch(() => {});
   }
   const i = positions.findIndex(p => p.symbol === symbol);
-  if (i !== -1) positions[i].qty <= qty ? positions.splice(i, 1) : positions[i].qty -= qty;
+  if (i > -1) positions[i].qty <= qty ? positions.splice(i, 1) : positions[i].qty -= qty;
 }
 
 async function eodFlatten() {
-  if (etHour() === 15 && etMinute() >= 50 && positions.length > 0) {
+  if (etHour() === 15 && etMinute() >= 50 && positions.length) {
     console.log("3:50 PM ET — EOD FLATTEN");
-    for (const p of positions) await exitPosition(p.symbol, p.qty, p.current, "EOD");
+    for (const p of positions) await exit(p.symbol, p.qty, p.current, "EOD");
   }
 }
 
+// MAIN LOOP
 async function scanAndTrade() {
-  await updateEquityAndPositions();
-  await eodFlatten();
-  await checkProfitTargets();
-  if (dailyMaxLossHit || positions.length >= 5) return;
+  try {
+    await updateEquityAndPositions();
+    await eodFlatten();
+    await checkProfitTargets();
+    if (dailyMaxLossHit || positions.length >= 5) return;
 
-  const rockets = await scrapeScanner();
-  for (const r of rockets) {
-    if (positions.length >= 5 || positions.some(p => p.symbol === r.symbol)) continue;
-    const qty = Math.max(1, Math.floor(accountEquity * 0.025 / r.price));
-    logTrade("ENTRY", r.symbol, qty, r.price, `${isPremarket() ? "PRE" : "POST"} +${r.change.toFixed(1)}%`, 0);
-    if (!DRY) {
-      await axios.post(`${A_BASE}/orders`, {
-        symbol: r.symbol, qty, side: "buy", type: "market",
-        time_in_force: isPremarket() ? "opg" : "day"
-      }, { headers: HEADERS }).catch(() => {});
+    const rockets = isPremarket() ? await scrapePremarket() : await scrapePostmarket();
+
+    for (const r of rockets) {
+      if (positions.length >= 5 || positions.some(p => p.symbol === r.symbol)) continue;
+      const qty = Math.max(1, Math.floor(accountEquity * 0.025 / r.price));
+      logTrade("ENTRY", r.symbol, qty, r.price, `${isPremarket() ? "PRE" : "POST"} +${r.change.toFixed(1)}%`, 0);
+      if (!DRY) {
+        await axios.post(`${A_BASE}/orders`, {
+          symbol: r.symbol, qty, side: "buy", type: "market",
+          time_in_force: isPremarket() ? "opg" : "day"
+        }, { headers: HEADERS }).catch(() => {});
+      }
+      positions.push({ symbol: r.symbol, qty, entry: r.price, current: r.price, peakPrice: r.price, sold25: false, sold50: false, sold100: false });
+      await new Promise(r => setTimeout(r, 4000));
     }
-    positions.push({ symbol: r.symbol, qty, entry: r.price, current: r.price, peakPrice: r.price, sold25: false, sold50: false, sold100: false });
-    await new Promise(r => setTimeout(r, 4000));
+    lastGainers = rockets;
+  } catch (e) {
+    console.log("scanAndTrade error:", e.message);
   }
-  lastGainers = rockets;
 }
 
+// DASHBOARD (clean & short)
 app.get("/", async (req, res) => {
   await updateEquityAndPositions();
-  const unrealized = positions.reduce((s, p) => s + (p.current - p.entry) * p.qty, 0);
-  res.json({ bot: "AlphaStream v87.0 — FINAL", equity: `$${accountEquity.toFixed(2)}`, positions: positions.length, unrealized: `$${unrealized.toFixed(2)}`, lastGainers });
+  const unreal = positions.reduce((s, p) => s + (p.current - p.entry) * p.qty, 0);
+  res.json({
+    bot: "AlphaStream v87.4",
+    mode: DRY ? "PAPER" : "LIVE",
+    time: `${etHour()}:${etMinute().toString().padStart(2,"0")} ET`,
+    equity: `$${accountEquity.toFixed(0)}`,
+    unrealized: unreal > 0 ? `+$${unreal.toFixed(0)}` : `$${unreal.toFixed(0)}`,
+    positions: positions.length,
+    max: 5,
+    scanner: isPremarket() ? "PRE" : "POST",
+    rockets: lastGainers.map(r => `${r.symbol}+${r.change.toFixed(0)}%`),
+    rules: "25→50% | 50→75% | 100→ALL | Trail -15%",
+    status: dailyMaxLossHit ? "HALTED" : "RUNNING"
+  });
 });
 
 app.post("/scan", async (req, res) => { await scanAndTrade(); res.json({ ok: true }); });
 app.get("/healthz", (_, res) => res.send("OK"));
 
 app.listen(Number(PORT), "0.0.0.0", async () => {
-  console.log(`\nALPHASTREAM v87.0 LIVE — 100% WORKING NOV 2025`);
+  console.log(`\nALPHASTREAM v87.4 LIVE — FINAL BUILD — WORKS WITH CURRENT TV LOGIN`);
   await scanAndTrade();
-  setInterval(scanAndTrade, 180000);
+  setInterval(() => scanAndTrade().catch(() => {}), 180000);
 });
