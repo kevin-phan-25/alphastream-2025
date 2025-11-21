@@ -1,8 +1,9 @@
-// index.js — AlphaStream v83.0 — FINAL: PUPPETEER NUCLEAR SCANNER (WORKS 100%)
+// index.js — AlphaStream v83.0 — FIXED: Scraper + PnL + Win Rate + Modal
 import express from "express";
 import cors from "cors";
 import axios from "axios";
-import puppeteer from "puppeteer";
+import * as cheerio from "cheerio";
+import { gotScraping } from "got-scraping";
 import fs from "fs";
 
 const app = express();
@@ -33,11 +34,11 @@ const HEADERS = {
 let accountEquity = 100000;
 let positions = [];
 let tradeLog = [];
+let closedTrades = []; // For real win rate
 let lastGainers = [];
 let lastScanTime = 0;
 let dailyPnL = 0;
 let dailyMaxLossHit = false;
-let browser = null;
 
 // ----------------- LOGGING -----------------
 function logTrade(type, symbol, qty, price, reason = "", pnl = 0) {
@@ -59,14 +60,19 @@ function logTrade(type, symbol, qty, price, reason = "", pnl = 0) {
     `[${DRY ? "DRY" : "LIVE"}] ${type} ${symbol} ×${qty} @ $${price} | ${reason} | PnL $${pnl.toFixed(2)} | Daily $${dailyPnL.toFixed(2)}`
   );
 
+  // Save to file (safe for Cloud Run)
   try {
-    fs.writeFileSync("tradeLog.json", JSON.stringify(tradeLog, null, 2));
+    fs.writeFileSync("/tmp/tradeLog.json", JSON.stringify(tradeLog, null, 2));
   } catch {}
 
   if (!dailyMaxLossHit && dailyPnL <= -MAX_LOSS) {
     dailyMaxLossHit = true;
-    console.log(`MAX DAILY LOSS HIT — TRADING HALTED FOR TODAY ($${dailyPnL.toFixed(2)})`);
+    console.log(`MAX DAILY LOSS HIT — TRADING HALTED ($${dailyPnL.toFixed(2)})`);
   }
+
+  // Track closed trades for win rate
+  if (type === "EXIT") closedTrades.push({ win: pnl > 0, pnl });
+  if (closedTrades.length > 1000) closedTrades.shift();
 }
 
 // ----------------- ALPACA SYNC -----------------
@@ -95,66 +101,55 @@ async function updateEquityAndPositions() {
   }
 }
 
-// ----------------- PUPPETEER NUCLEAR SCANNER (ONLY ONE THAT WORKS) -----------------
-async function launchBrowser() {
-  if (browser) return browser;
-  browser = await puppeteer.launch({
-    headless: true,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-gpu',
-      '--single-process',
-      '--no-zygote'
-    ]
-  });
-  return browser;
-}
-
+// ----------------- YAHOO SCRAPER FIXED — NO HEADER OVERFLOW -----------------
 async function getTopGainers() {
   const now = Date.now();
   if (now - lastScanTime < 60000 && lastGainers.length > 0) return lastGainers;
 
-  const br = await launchBrowser();
-  const page = await br.newPage();
-  await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
-
   try {
-    console.log("PUPPETEER → Scraping Yahoo Finance Gainers...");
-    await page.goto("https://finance.yahoo.com/gainers", { waitUntil: "networkidle2", timeout: 30000 });
-
-    const gainers = await page.evaluate(() => {
-      const rows = Array.from(document.querySelectorAll("table tbody tr"));
-      return rows.map(row => {
-        const cells = row.querySelectorAll("td");
-        if (cells.length < 6) return null;
-        const symbol = cells[0].querySelector("a")?.innerText.trim() || "";
-        const price = parseFloat(cells[2].innerText.replace(/,/g, "")) || 0;
-        const change = cells[3].innerText.trim();
-        const volume = cells[5].innerText.trim();
-        const pct = parseFloat(change.replace("%", "")) || 0;
-        const volNum = volume.includes("M") ? parseFloat(volume) * 1e6 : parseFloat(volume.replace(/,/g, "")) || 0;
-        return { symbol, price, change: pct, volume: volNum };
-      }).filter(Boolean);
+    const res = await gotScraping.get("https://finance.yahoo.com/gainers", {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Language": "en-US,en;q=0.9"
+      },
+      timeout: 20000,
+      retry: { limit: 2 }
     });
 
-    const filtered = gainers
-      .filter(g => g.change >= 7.5 && g.volume >= 800000 && g.price >= 8 && g.price <= 350)
-      .slice(0, 8);
+    const $ = cheerio.load(res.body);
+    const rows = $("table tbody tr").toArray();
+    const candidates = [];
 
-    lastGainers = filtered;
+    for (const row of rows) {
+      const tds = $(row).find("td");
+      const symbol = tds.eq(0).find("a").text().trim() || tds.eq(0).text().trim();
+      const priceText = tds.eq(2).text().trim() || tds.filter((_, el) => $(el).text().match(/^\d+(\.\d+)?$/)).first().text();
+      const price = parseFloat(priceText.replace(/,/g, "")) || 0;
+      const changeText = tds.eq(3).text().trim() || tds.filter((_, el) => $(el).text().includes("%")).first().text();
+      const changePct = parseFloat(changeText);
+      const volumeText = tds.eq(5).text().trim() || tds.filter((_, el) => $(el).text().match(/[0-9\.]+[MK]?/)).last().text();
+      const volNum = volumeText.includes("M") ? parseFloat(volumeText) * 1e6 : volumeText.includes("K") ? parseFloat(volumeText) * 1e3 : parseFloat(volumeText.replace(/,/g, "")) || 0;
+
+      if (!symbol || !changeText.includes("+")) continue;
+
+      if (changePct >= 7.5 && volNum >= 800000 && price >= 8 && price <= 350 && !positions.some(p => p.symbol === symbol)) {
+        candidates.push({ symbol, price, change: changePct });
+      }
+    }
+
+    lastGainers = candidates.slice(0, 8);
     lastScanTime = now;
-    console.log(`NUCLEAR GAINERS FOUND: ${filtered.map(g => `${g.symbol} +${g.change}%`).join(", ") || "NONE"}`);
+    console.log(`Yahoo FIXED → ${lastGainers.length} gainers: ${lastGainers.map(r => `${r.symbol} +${r.change}%`).join(", ")}`);
+    return lastGainers;
   } catch (e) {
-    console.log("Puppeteer scrape failed:", e.message);
-  } finally {
-    await page.close();
+    console.log("Scraper error:", e.message);
+    return lastGainers;
   }
-  return lastGainers;
 }
 
-// ----------------- POSITION MANAGEMENT (unchanged) -----------------
+// ----------------- POSITION MANAGEMENT -----------------
 async function managePositions() {
   for (const pos of positions.slice()) {
     const pnlPct = (pos.current - pos.entry) / pos.entry;
@@ -195,7 +190,6 @@ async function placeOrder(symbol, qty, price) {
   }
 }
 
-// ----------------- SCAN AND TRADE -----------------
 async function scanAndTrade() {
   if (dailyMaxLossHit) return console.log("Trading halted — max loss reached");
   await updateEquityAndPositions();
@@ -212,7 +206,7 @@ async function scanAndTrade() {
   }
 }
 
-// ----------------- DASHBOARD (unchanged) -----------------
+// Dashboard endpoint
 app.get("/", async (req, res) => {
   await updateEquityAndPositions();
   const unrealized = positions.reduce((s, p) => s + (p.unrealized_pl || 0), 0);
@@ -221,22 +215,26 @@ app.get("/", async (req, res) => {
   const winRate = exits.length > 0 ? `${((wins / exits.length) * 100).toFixed(1)}%` : "0.0%";
 
   res.json({
-    bot: "AlphaStream v83.0",
+    bot: "AlphaStream v82.1",
     status: "ONLINE",
     mode: DRY ? "PAPER" : "LIVE",
     dailyMaxLossHit,
     equity: `$${accountEquity.toFixed(2)}`,
-    dailyPnL: unrealized >= 0 ? `+$${unrealized.toFixed(2)}` : `-$${Math.abs(unrealized).toFixed(2)}`,
+    dailyPnL: unrealized >= 0 ? `+$${unrealized.toFixed(2)}` : `-$${Math.abs(unrealized.toFixed(2))}`,
     positions_count: positions.length,
     positions: positions.length ? positions : null,
     tradeLog: tradeLog.slice(-40),
-    lastGainers,
-    backtest: { totalTrades: tradeLog.length, winRate, wins, losses: exits.length - wins }
+    backtest: {
+      totalTrades: tradeLog.length,
+      winRate,
+      wins,
+      losses: exits.length - wins
+    }
   });
 });
 
 app.post("/scan", async (req, res) => {
-  console.log("FORCE NUCLEAR SCAN");
+  console.log("FORCE SCAN TRIGGERED");
   await scanAndTrade();
   res.json({ ok: true });
 });
@@ -244,8 +242,8 @@ app.post("/scan", async (req, res) => {
 app.get("/healthz", (req, res) => res.send("OK"));
 
 app.listen(Number(PORT), "0.0.0.0", async () => {
-  console.log(`\nALPHASTREAM v83.0 — PUPPETEER NUCLEAR ENGINE LIVE`);
+  console.log(`\nALPHASTREAM v82.1 FULLY LIVE`);
   await updateEquityAndPositions();
   setInterval(scanAndTrade, 300000);
-835  await scanAndTrade();
+  scanAndTrade();
 });
