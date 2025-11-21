@@ -1,4 +1,4 @@
-// index.js — AlphaStream v87.7 — FINAL | 100% WORKING | NO MORE ERRORS
+// index.js — AlphaStream v88.0 — ROBUST HEADLESS LOGIN + SCRAPER
 import express from "express";
 import cors from "cors";
 import axios from "axios";
@@ -9,8 +9,13 @@ app.use(cors());
 app.use(express.json());
 
 const {
-  ALPACA_KEY = "", ALPACA_SECRET = "", DRY_MODE = "true", PORT = "8080",
-  MAX_DAILY_LOSS = "500", TV_EMAIL = "", TV_PASSWORD = ""
+  ALPACA_KEY = "",
+  ALPACA_SECRET = "",
+  DRY_MODE = "true",
+  PORT = "8080",
+  MAX_DAILY_LOSS = "500",
+  TV_EMAIL = "",
+  TV_PASSWORD = ""
 } = process.env;
 
 const DRY = DRY_MODE.toLowerCase() === "true";
@@ -35,6 +40,7 @@ const isPremarket = () => {
   return (h >= 4 && h < 9) || (h === 9 && m < 30);
 };
 
+// LOGGING
 function logTrade(type, symbol, qty, price, reason = "", pnl = 0) {
   dailyPnL += pnl;
   if (!dailyMaxLossHit && dailyPnL <= -MAX_LOSS) {
@@ -44,6 +50,7 @@ function logTrade(type, symbol, qty, price, reason = "", pnl = 0) {
   console.log(`[${DRY?"DRY":"LIVE"}] ${type} ${symbol} ×${qty} @ $${price.toFixed(4)} | ${reason} | $${pnl >= 0 ? "+" : ""}${pnl.toFixed(0)}`);
 }
 
+// UPDATE EQUITY & POSITIONS
 async function updateEquityAndPositions() {
   if (!ALPACA_KEY) return;
   try {
@@ -60,12 +67,13 @@ async function updateEquityAndPositions() {
   } catch (e) { console.log("Alpaca error:", e.message); }
 }
 
+// GET/REUSE PUPPETEER PAGE
 async function getPage() {
   if (!browser) {
     browser = await puppeteer.launch({
       headless: true,
       executablePath: "/usr/bin/google-chrome",
-      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--single-process", "--no-zygote"]
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
     });
   }
   if (!sharedPage || sharedPage.isClosed()) {
@@ -76,61 +84,80 @@ async function getPage() {
   return sharedPage;
 }
 
-// 100% WORKING LOGIN — NOV 2025 (tested live 5 mins ago)
-async function loginTV(page) {
+// ROBUST TRADINGVIEW LOGIN — RETRIES + OVERLAY HANDLING
+async function loginTV(page, retries = 3) {
   if (!TV_EMAIL || !TV_PASSWORD) return false;
-  try {
-    await page.goto("https://www.tradingview.com/", { waitUntil: "networkidle2", timeout: 45000 });
+  for (let i = 0; i < retries; i++) {
+    try {
+      await page.goto("https://www.tradingview.com/", { waitUntil: "networkidle2", timeout: 60000 });
 
-    if (await page.$("[data-name='header-user-menu-button']")) {
-      console.log("TV: Already logged in");
-      return true;
+      if (await page.$("[data-name='header-user-menu-button']")) {
+        console.log("TV: Already logged in");
+        return true;
+      }
+
+      // Click sign-in button
+      await page.evaluate(() => {
+        const btn = Array.from(document.querySelectorAll("button, a"))
+          .find(el => /sign in|log in/i.test(el.textContent || ""));
+        if (btn) btn.click();
+      });
+      await page.waitForTimeout(5000);
+
+      // Remove banners/overlays
+      await page.evaluate(() => {
+        const overlays = document.querySelectorAll(".tv-cookie-banner, .tv-dialog, .tv-banner, .tv-modal");
+        overlays.forEach(el => el.remove());
+      });
+
+      // Wait for inputs
+      await page.waitForSelector(
+        'input[data-name="username-input"], input[placeholder*="Email"], input[placeholder*="Username"], input[type="text"]',
+        { timeout: 30000 }
+      );
+
+      // Type credentials
+      await page.focus('input[data-name="username-input"], input[placeholder*="Email"], input[type="text"]');
+      await page.keyboard.down('Control'); await page.keyboard.press('A'); await page.keyboard.up('Control');
+      await page.type('input[data-name="username-input"], input[placeholder*="Email"]', TV_EMAIL, { delay: 50 });
+      await page.type('input[type="password"]', TV_PASSWORD, { delay: 50 });
+
+      await Promise.all([
+        page.click('button:has-text("Sign in"), button[type="submit"]'),
+        page.waitForNavigation({ waitUntil: "networkidle2", timeout: 45000 }).catch(() => {})
+      ]);
+
+      await page.waitForTimeout(5000);
+
+      if (await page.$("[data-name='header-user-menu-button']")) {
+        console.log("TV: LOGIN SUCCESS");
+        return true;
+      }
+      console.log(`TV: LOGIN ATTEMPT ${i + 1} FAILED — RETRYING`);
+    } catch (e) {
+      console.log("Login attempt error:", e.message);
+      await page.waitForTimeout(3000);
     }
-
-    await page.evaluate(() => {
-      const btn = Array.from(document.querySelectorAll("button, a"))
-        .find(el => /sign in|log in/i.test(el.textContent || ""));
-      if (btn) btn.click();
-    });
-    await new Promise(r => setTimeout(r, 5000));
-
-    // Ultra-wide selector + 30s timeout
-    await page.waitForSelector('input[data-name="username-input"], input[placeholder*="Email"], input[placeholder*="Username"], input[type="text"]', { timeout: 30000 });
-
-    await page.click('input[data-name="username-input"], input[placeholder*="Email"], input[type="text"]');
-    await page.keyboard.down('Control'); await page.keyboard.press('A'); await page.keyboard.up('Control');
-    await page.type('input[data-name="username-input"], input[placeholder*="Email"]', TV_EMAIL);
-    await page.type('input[type="password"]', TV_PASSWORD);
-
-    await Promise.all([
-      page.click('button:has-text("Sign in"), button[type="submit"]'),
-      page.waitForNavigation({ waitUntil: "networkidle2", timeout: 30000 }).catch(() => {})
-    ]);
-
-    await new Promise(r => setTimeout(r, 7000));
-    const success = await page.$("[data-name='header-user-menu-button']") !== null;
-    console.log(success ? "TV: LOGIN SUCCESS" : "TV: LOGIN FAILED");
-    return success;
-  } catch (e) {
-    console.log("Login error:", e.message);
-    return false;
   }
+  console.log("TV: LOGIN FAILED AFTER RETRIES");
+  return false;
 }
 
+// OPEN EXTENDED SCREENER
 async function openExtended(page) {
   await page.evaluate(() => {
     const btn = Array.from(document.querySelectorAll("button"))
       .find(b => /extended|pre|post/i.test(b.textContent || "") || b.getAttribute("data-name")?.includes("extended"));
     if (btn) btn.click();
   });
-  await new Promise(r => setTimeout(r, 6000));
+  await page.waitForTimeout(6000);
 }
 
-// FINAL SCRAPER — isPremarket passed in, no Node functions inside evaluate
+// FINAL SCRAPER
 async function scrape() {
   const page = await getPage();
   const start = Date.now();
-  const premarket = isPremarket();  // ← captured here
+  const premarket = isPremarket();
 
   try {
     await loginTV(page);
@@ -152,10 +179,10 @@ async function scrape() {
           ? r.change >= 20 && r.price >= 1 && r.vol >= 500000 && r.fl <= 30e6
           : r.price <= 20 && r.change >= 30 && r.vol >= 1e6 && r.fl <= 40e6;
       });
-    }, premarket);  // ← passed in
+    }, premarket);
 
     const label = premarket ? "PRE-MARKET" : "POST-MARKET";
-    console.log(`${label} → ${rockets.length} rockets (${((Date.now()-start)/1000).toFixed(1)}s)`);
+    console.log(`${label} → ${rockets.length} rockets (${((Date.now() - start)/1000).toFixed(1)}s)`);
     return rockets.slice(0, 5);
   } catch (e) {
     console.log("Scrape error:", e.message);
@@ -163,7 +190,7 @@ async function scrape() {
   }
 }
 
-// PROFIT-TAKING (unchanged — perfect)
+// PROFIT TARGETS & EXIT LOGIC
 async function checkProfitTargets() {
   for (const p of positions) {
     const pnl = ((p.current - p.entry) / p.entry) * 100;
@@ -193,6 +220,7 @@ async function eodFlatten() {
   }
 }
 
+// SCAN & TRADE
 async function scanAndTrade() {
   if (dailyMaxLossHit) return console.log("HALTED — DAILY MAX LOSS");
   try {
@@ -221,11 +249,12 @@ async function scanAndTrade() {
   }
 }
 
+// EXPRESS ENDPOINTS
 app.get("/", async (req, res) => {
   await updateEquityAndPositions();
   const unreal = positions.reduce((s, p) => s + (p.current - p.entry) * p.qty, 0);
   res.json({
-    bot: "AlphaStream v87.7 — FINAL",
+    bot: "AlphaStream v88.0 — ROBUST",
     mode: DRY ? "PAPER" : "LIVE",
     time: `${etHour()}:${etMinute().toString().padStart(2,"0")} ET`,
     equity: `$${accountEquity.toFixed(0)}`,
@@ -244,8 +273,9 @@ app.get("/", async (req, res) => {
 app.post("/scan", async (req, res) => { await scanAndTrade(); res.json({ ok: true }); });
 app.get("/healthz", (_, res) => res.send("OK"));
 
+// START SERVER
 app.listen(Number(PORT), "0.0.0.0", async () => {
-  console.log(`\nALPHASTREAM v87.7 LIVE — 100% STABLE — NOV 21 2025`);
+  console.log(`\nALPHASTREAM v88.0 LIVE — ROBUST HEADLESS — NOV 21 2025`);
   await scanAndTrade();
   setInterval(() => scanAndTrade().catch(() => {}), 180000);
 });
