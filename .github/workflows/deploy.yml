@@ -35,5 +35,7 @@ jobs:
             --no-cpu-throttling \
             --set-env-vars=ALPACA_KEY=${{ secrets.ALPACA_KEY }} \
             --set-env-vars=ALPACA_SECRET=${{ secrets.ALPACA_SECRET }} \
+            --set-env-vars=TV_EMAIL=${{ secrets.TV_EMAIL }} \
+            --set-env-vars=TV_PASSWORD=${{ secrets.TV_PASSWORD }} \
             --set-env-vars=DRY_MODE=true \
             --set-env-vars=MAX_DAILY_LOSS=500
