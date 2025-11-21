@@ -224,3 +224,54 @@ app.listen(8080, "0.0.0.0", () => {
   setInterval(scanAndTrade, 180000);
   scanAndTrade();
 });
+// FINAL /trades ENDPOINT — LIVE WIN RATE + FULL STATS (add to your index.js)
+app.get("/trades", async (req, res) => {
+  if (!fs.existsSync("trades.csv")) {
+    return res.json({ trades: [], stats: { trades: 0, wins: 0, losses: 0, winRate: "0.0", avgWin: "0.0", avgLoss: "0.0", netPnL: "0.0" }});
+  }
+
+  const lines = fs.readFileSync("trades.csv", "utf-8").trim().split("\n").filter(Boolean);
+  const trades = [];
+  let entry = null;
+
+  for (const line of lines) {
+    const cols = line.split(",");
+    const type = cols[1];
+    const symbol = cols[2];
+    const price = parseFloat(cols[4]);
+    const pattern = cols[7] || "momentum";
+
+    if (type === "ENTRY") {
+      entry = { symbol, entryPrice: price, pattern };
+    } else if (type === "EXIT" && entry && entry.symbol === symbol) {
+      const pnlPct = ((price - entry.entryPrice) / entry.entryPrice * 100).toFixed(2);
+      trades.push({
+        symbol,
+        pattern: entry.pattern.toUpperCase(),
+        pnlPct,
+        result: parseFloat(pnlPct) >= 0 ? "WIN" : "LOSS",
+        time: cols[0].split("T")[0] + " " + cols[0].split("T")[1].split(".")[0]
+      });
+      entry = null;
+    }
+  }
+
+  const wins = trades.filter(t => t.result === "WIN");
+  const losses = trades.filter(t => t.result === "LOSS");
+  const winRate = trades.length ? (wins.length / trades.length * 100).toFixed(1) : "0.0";
+  const avgWin = wins.length ? (wins.reduce((s, t) => s + parseFloat(t.pnlPct), 0) / wins.length).toFixed(1) : "0.0";
+  const avgLoss = losses.length ? (losses.reduce((s, t) => s + parseFloat(t.pnlPct), 0) / losses.length).toFixed(1) : "0.0";
+
+  res.json({
+    trades: trades.slice(-100), // last 100 trades
+    stats: {
+      trades: trades.length,
+      wins: wins.length,
+      losses: losses.length,
+      winRate,
+      avgWin: `+${avgWin}%`,
+      avgLoss: `${avgLoss}%`,
+      netPnL: (wins.length * parseFloat(avgWin) + losses.length * parseFloat(avgLoss)).toFixed(1)
+    }
+  });
+});
