@@ -1,3 +1,4 @@
+# .github/workflows/deploy.yml
 name: Deploy AlphaStream Autopilot
 
 on:
@@ -7,21 +8,29 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          workload_identity_provider: 'projects/YOUR_PROJECT_NUMBER/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
+          service_account: 'github-actions@alphastream-2025.iam.gserviceaccount.com'
+          # OR use service account key if you prefer (less secure)
+          # credentials_json: ${{ secrets.GCP_SA_KEY }}
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: Install Dependencies
-        run: npm install  # This installs cheerio from your updated package.json
+      - name: Configure Docker auth for Artifact Registry
+        run: gcloud auth configure-docker us-east1-docker.pkg.dev
 
-      - name: Deploy to Cloud Run
+      - name: Build & Deploy to Cloud Run (with proper Puppeteer support)
         run: |
           gcloud run deploy alphastream-autopilot \
             --source . \
@@ -30,11 +39,15 @@ jobs:
             --allow-unauthenticated \
             --quiet \
             --port=8080 \
-            --timeout=300 \
-            --memory=1Gi \
-            --cpu=1 \
+            --timeout=540 \
+            --memory=2Gi \
+            --cpu=2 \
             --max-instances=10 \
+            --no-cpu-throttling \
             --set-env-vars=ALPACA_KEY=${{ secrets.ALPACA_KEY }} \
             --set-env-vars=ALPACA_SECRET=${{ secrets.ALPACA_SECRET }} \
             --set-env-vars=DRY_MODE=true \
-            --no-cpu-throttling
+            --set-env-vars=MAX_DAILY_LOSS=500
+
+      - name: Success Message
+        run: echo "ALPHASTREAM v83.0 — PUPPETEER NUCLEAR ENGINE DEPLOYED & LIVE"
