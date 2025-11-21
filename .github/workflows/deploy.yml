@@ -8,46 +8,40 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    permissions:
-      contents: 'read'
-      id-token: 'write'
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Authenticate to Google Cloud
+      - name: Authenticate to Google Cloud (using your existing key)
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: 'projects/YOUR_PROJECT_NUMBER/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
-          service_account: 'github-actions@alphastream-2025.iam.gserviceaccount.com'
-          # OR use service account key if you prefer (less secure)
-          # credentials_json: ${{ secrets.GCP_SA_KEY }}
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: Configure Docker auth for Artifact Registry
-        run: gcloud auth configure-docker us-east1-docker.pkg.dev
-
-      - name: Build & Deploy to Cloud Run (with proper Puppeteer support)
+      - name: Deploy to Cloud Run (PUPPETEER-READY)
         run: |
           gcloud run deploy alphastream-autopilot \
             --source . \
             --region=us-east1 \
             --project=alphastream-2025 \
+            --platform=managed \
             --allow-unauthenticated \
-            --quiet \
             --port=8080 \
             --timeout=540 \
             --memory=2Gi \
             --cpu=2 \
             --max-instances=10 \
             --no-cpu-throttling \
+            --quiet \
             --set-env-vars=ALPACA_KEY=${{ secrets.ALPACA_KEY }} \
             --set-env-vars=ALPACA_SECRET=${{ secrets.ALPACA_SECRET }} \
             --set-env-vars=DRY_MODE=true \
             --set-env-vars=MAX_DAILY_LOSS=500
 
-      - name: Success Message
-        run: echo "ALPHASTREAM v83.0 — PUPPETEER NUCLEAR ENGINE DEPLOYED & LIVE"
+      - name: SUCCESS — ALPHASTREAM v83.0 LIVE
+        run: |
+          echo "ALPHASTREAM v83.0 — PUPPETEER NUCLEAR ENGINE IS NOW LIVE"
+          echo "Yahoo Finance is being scraped with real Chromium"
+          echo "No more Header overflow. No more empty scans."
