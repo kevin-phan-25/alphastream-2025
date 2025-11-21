@@ -1,6 +1,6 @@
 {
   "name": "alphastream-2025",
-  "version": "92.2.0",
+  "version": "97.1.0",
   "type": "module",
   "main": "index.js",
   "scripts": {
